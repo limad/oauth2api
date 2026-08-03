@@ -402,6 +402,14 @@ test("detectExhaustedReason recognises documented codes", () => {
     detectExhaustedReason(JSON.stringify({ code: "refresh_token_reused" })),
     "reused",
   );
+  // OpenAI's actual auth backend uses this code name (not the
+  // "refresh_token_invalidated" doc form) for the same terminal condition.
+  assert.equal(
+    detectExhaustedReason(
+      JSON.stringify({ error: { code: "invalid_refresh_token" } }),
+    ),
+    "invalidated",
+  );
   // Non-terminal codes / parse failures return null.
   assert.equal(
     detectExhaustedReason(JSON.stringify({ error: { code: "rate_limited" } })),
@@ -492,6 +500,60 @@ test("refresh policy 'since-last-refresh' skips fresh accounts even near expiry"
     );
     assert.equal(should, false, "fresh account must not be refreshed");
     assert.equal(refreshCalls, 0);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("shouldRefresh skips accounts in cooldown even when the policy says stale", async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-"));
+  try {
+    // addAccount() always stamps last_refresh with "now", which would mask
+    // the bug (see the 'triggers when stale' test above) — write the token
+    // file directly with an ancient last_refresh and load() it instead, the
+    // way a real restart picks up a long-stale account.
+    saveToken(tmpDir, {
+      accessToken: "a",
+      refreshToken: "b",
+      email: "x@y.z",
+      expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+      accountUuid: "u",
+      provider: "codex",
+      lastRefreshAt: new Date(Date.now() - 30 * 86_400_000).toISOString(),
+    });
+    const manager = new AccountManager(tmpDir, {
+      provider: "codex",
+      refresh: async (): Promise<TokenData> => {
+        throw new RefreshTokenExhaustedError("invalidated", 401, "");
+      },
+      refreshPolicy: { kind: "since-last-refresh", maxAgeMs: 8 * 86_400_000 },
+    });
+    manager.load();
+
+    // First attempt fails terminally and sets a long cooldown.
+    const ok = await manager.refreshAccount("x@y.z");
+    assert.equal(ok, false);
+
+    const proto: any = manager.constructor.prototype;
+    const acct = (manager as any).accounts.get("x@y.z");
+    // The account is still just as "stale" by lastRefreshAt as before the
+    // failed attempt — only the cooldown changed. Without the cooldown
+    // check, shouldRefresh would say "yes" again on every 60s sweep tick,
+    // hammering an already-dead refresh token indefinitely.
+    const should = proto.shouldRefresh.call(manager, acct, Date.now());
+    assert.equal(
+      should,
+      false,
+      "must not retry a cooled-down account before the cooldown lapses",
+    );
+
+    // Once the cooldown has lapsed, the policy is consulted again.
+    const shouldAfterCooldown = proto.shouldRefresh.call(
+      manager,
+      acct,
+      acct.cooldownUntil + 1,
+    );
+    assert.equal(shouldAfterCooldown, true);
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }

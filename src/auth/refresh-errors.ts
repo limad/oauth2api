@@ -52,6 +52,11 @@ export function detectExhaustedReason(
   const normalized = code.toLowerCase();
   if (normalized === "refresh_token_expired") return "expired";
   if (normalized === "refresh_token_reused") return "reused";
+  // "refresh_token_invalidated" is the code-name form; OpenAI's actual auth
+  // backend returns "invalid_refresh_token" for the same terminal condition
+  // (seen on codex refresh 401s: "Could not validate your refresh token.
+  // Please try signing in again."). Both mean the token is dead, not retryable.
   if (normalized === "refresh_token_invalidated") return "invalidated";
+  if (normalized === "invalid_refresh_token") return "invalidated";
   return null;
 }

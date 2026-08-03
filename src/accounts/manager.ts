@@ -573,6 +573,12 @@ export class AccountManager {
   }
 
   private shouldRefresh(acct: AccountState, now: number): boolean {
+    // A cooldown means a recent attempt already failed (backoff) or the
+    // refresh token was declared permanently unusable (terminal, 24h). In
+    // both cases hammering the upstream every REFRESH_CHECK_INTERVAL_MS
+    // achieves nothing but log noise and extra load on the provider — wait
+    // out the cooldown before trying again.
+    if (acct.cooldownUntil > now) return false;
     const policy = this.refreshPolicy;
     if (policy.kind === "expires-lead") {
       const expiresAt = new Date(acct.token.expiresAt).getTime();
