@@ -3,6 +3,8 @@ import { resolveModel } from "../upstream/translator";
 import { buildAnthropicProvider } from "./anthropic";
 import { buildCodexProvider } from "./codex";
 import { buildCursorProvider } from "./cursor";
+import { buildCopilotProvider } from "./copilot";
+import { buildGeminiProvider } from "./gemini";
 import { Provider } from "./types";
 
 export interface ProviderRegistry {
@@ -18,8 +20,16 @@ export function buildRegistry(authDir: string): ProviderRegistry {
   const anthropic = buildAnthropicProvider(authDir);
   const codex = buildCodexProvider(authDir);
   const cursor = buildCursorProvider(authDir);
-  const byId: Record<ProviderId, Provider> = { anthropic, codex, cursor };
-  const ordered: Provider[] = [anthropic, codex, cursor];
+  const copilot = buildCopilotProvider(authDir);
+  const gemini = buildGeminiProvider(authDir);
+  const byId: Record<ProviderId, Provider> = {
+    anthropic,
+    codex,
+    cursor,
+    copilot,
+    gemini,
+  };
+  const ordered: Provider[] = [anthropic, codex, cursor, copilot, gemini];
 
   return {
     get: (id) => {
@@ -32,6 +42,8 @@ export function buildRegistry(authDir: string): ProviderRegistry {
       // Explicit `cursor-` / `cr/` prefix always wins so users can force the
       // Cursor backend when they have multiple providers logged in.
       if (cursor.matchesModel(resolved)) return cursor;
+      if (copilot.matchesModel(resolved)) return copilot;
+      if (gemini.matchesModel(resolved)) return gemini;
 
       // "Cursor exclusive" mode: when only Cursor has accounts, route every
       // unknown / Anthropic-style / OpenAI-style model through Cursor. This
@@ -40,7 +52,9 @@ export function buildRegistry(authDir: string): ProviderRegistry {
       const cursorOnly =
         cursor.manager.accountCount > 0 &&
         anthropic.manager.accountCount === 0 &&
-        codex.manager.accountCount === 0;
+        codex.manager.accountCount === 0 &&
+        copilot.manager.accountCount === 0 &&
+        gemini.manager.accountCount === 0;
       if (cursorOnly) return cursor;
 
       // Multi-provider setups: fall back to the explicit family routes.

@@ -1,4 +1,4 @@
-export type ProviderId = "anthropic" | "codex" | "cursor";
+export type ProviderId = "anthropic" | "codex" | "cursor" | "copilot" | "gemini";
 
 export interface PKCECodes {
   codeVerifier: string;
@@ -27,6 +27,17 @@ export interface TokenData {
   cursorClientId?: string;
   /** Cursor only — membership tier from Cursor local storage. */
   cursorMembershipType?: string;
+  /**
+   * Gemini only — Code Assist project id resolved once via the
+   * loadCodeAssist/onboardUser handshake at login time. Not returned by
+   * refresh; AccountManager's refresh merge (`{...old, ...refreshed}`)
+   * preserves it as long as the refresh TokenData omits the key entirely.
+   */
+  geminiProjectId?: string;
+  /** Gemini only — Code Assist tier id (e.g. "free-tier", "standard-tier"). */
+  geminiUserTier?: string;
+  /** Gemini only — which v1internal base (sandbox/daily/prod) worked at onboarding time. */
+  geminiApiBase?: string;
 }
 
 export interface TokenStorage {
@@ -44,4 +55,7 @@ export interface TokenStorage {
   cursor_config_version?: string;
   cursor_client_id?: string;
   cursor_membership_type?: string;
+  gemini_project_id?: string;
+  gemini_user_tier?: string;
+  gemini_api_base?: string;
 }

@@ -93,6 +93,7 @@ async function proxyCodexChatCompletions(args: {
 
   await proxyWithRetry("ChatCompletions(codex)", resp, config, {
     manager: provider.manager,
+    profile: req.header("x-auth2api-profile") || undefined,
     upstream: (account, signal) =>
       provider.callMessages({
         body: responsesBody,
@@ -223,6 +224,7 @@ async function proxyCodexResponses(args: {
 
   await proxyWithRetry("Responses(codex)", resp, config, {
     manager: provider.manager,
+    profile: req.header("x-auth2api-profile") || undefined,
     upstream: (account, signal) =>
       provider.callMessages({
         body: responsesBody,
@@ -374,6 +376,7 @@ async function proxyCursorChatCompletions(args: {
 
   await proxyWithRetry("ChatCompletions(cursor)", resp, config, {
     manager: provider.manager,
+    profile: req.header("x-auth2api-profile") || undefined,
     upstream: (account, signal) => {
       const cloaked =
         provider.applyCloaking?.({
@@ -511,6 +514,41 @@ export function createChatCompletionsHandler(
       // Cursor's chat upstream is also stream-only, so for non-streaming
       // requests we let the provider stream internally and aggregate the
       // pieces here before responding with a single chat.completion JSON.
+      if (provider.id === "copilot") {
+        await proxyWithRetry("ChatCompletions(copilot)", resp, config, {
+          manager: provider.manager,
+          profile: req.header("x-auth2api-profile") || undefined,
+          upstream: (account, signal) =>
+            provider.callMessages({
+              body,
+              request: req,
+              account,
+              config,
+              signal,
+            }),
+          success: async (upstream, account) => {
+            if (stream) {
+              const result = await handleStreamingResponse(upstream, resp);
+              if (result.completed) {
+                provider.manager.recordSuccess(account.token.email, result.usage);
+              } else if (!result.clientDisconnected) {
+                provider.manager.recordFailure(
+                  account.token.email,
+                  "network",
+                  "stream terminated before completion",
+                );
+              }
+            } else {
+              const data = await upstream.json();
+              provider.manager.recordSuccess(account.token.email, extractUsage(data));
+              resp.json(data);
+            }
+          },
+          errorAdapter: openaiErrorBody,
+        });
+        return;
+      }
+
       if (provider.id === "cursor") {
         await proxyCursorChatCompletions({
           req,
@@ -555,6 +593,7 @@ export function createChatCompletionsHandler(
 
       await proxyWithRetry("ChatCompletions", resp, config, {
         manager: provider.manager,
+        profile: req.header("x-auth2api-profile") || undefined,
         upstream: (account, signal) => {
           const cloaked =
             provider.applyCloaking?.({
@@ -643,6 +682,17 @@ export function createResponsesHandler(
           return;
         }
 
+        if (provider.id === "copilot") {
+          resp.status(400).json({
+            error: {
+              message: "Copilot provider currently supports /v1/chat/completions only.",
+              type: "unsupported_endpoint_for_provider",
+              provider: provider.id,
+            },
+          });
+          return;
+        }
+
         // Cursor: normalizeCursorResponsesBody forces stream:true and
         // cursor's transport only emits SSE. We deliberately keep the
         // legacy "always stream the response back to the client"
@@ -654,6 +704,7 @@ export function createResponsesHandler(
         const normalizedBody = normalizeCursorResponsesBody(body);
         await proxyWithRetry("Responses", resp, config, {
           manager: provider.manager,
+          profile: req.header("x-auth2api-profile") || undefined,
           upstream: (account, signal) =>
             provider.callMessages({
               body: normalizedBody,
@@ -687,6 +738,7 @@ export function createResponsesHandler(
 
       await proxyWithRetry("Responses", resp, config, {
         manager: provider.manager,
+        profile: req.header("x-auth2api-profile") || undefined,
         upstream: (account, signal) => {
           const cloaked =
             provider.applyCloaking?.({

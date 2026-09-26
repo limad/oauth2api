@@ -28,10 +28,15 @@ function parseProviderArg(args: string[]): ProviderId {
   const flag = args.find((a) => a.startsWith("--provider="));
   if (!flag) return "anthropic";
   const value = flag.split("=", 2)[1];
-  if (value === "anthropic" || value === "codex" || value === "cursor")
+  if (
+    value === "anthropic" ||
+    value === "codex" ||
+    value === "cursor" ||
+    value === "gemini"
+  )
     return value;
   throw new Error(
-    `Unknown provider "${value}". Supported: anthropic, codex, cursor`,
+    `Unknown provider "${value}". Supported: anthropic, codex, cursor, gemini`,
   );
 }
 

@@ -94,6 +94,7 @@ export interface ProxyOptions {
    */
   errorAdapter?: (status: number, body: string) => any;
   maxRetries?: number;
+  profile?: string;
 }
 
 function waitForRetry(ms: number, signal: AbortSignal): Promise<boolean> {
@@ -140,7 +141,7 @@ export async function proxyWithRetry(
 
   try {
     for (let attempt = 0; attempt < maxRetries; attempt++) {
-      const result = manager.getNextAccount();
+      const result = options.profile ? manager.getAccountByProfileId(options.profile) : manager.getNextAccount();
       if (!result.account) {
         return accountUnavailable(resp, result, manager.provider);
       }

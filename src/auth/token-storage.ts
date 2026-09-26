@@ -9,11 +9,15 @@ const FILENAME_PREFIX: Record<ProviderId, string> = {
   anthropic: "claude",
   codex: "codex",
   cursor: "cursor",
+  copilot: "copilot",
+  gemini: "gemini",
 };
 
 function normaliseProvider(type: TokenStorage["type"] | undefined): ProviderId {
   if (type === "cursor") return "cursor";
   if (type === "codex") return "codex";
+  if (type === "copilot") return "copilot";
+  if (type === "gemini") return "gemini";
   return "anthropic"; // "claude" or missing → anthropic (legacy files)
 }
 
@@ -50,6 +54,9 @@ export function tokenToStorage(data: TokenData): TokenStorage {
     cursor_config_version: data.cursorConfigVersion,
     cursor_client_id: data.cursorClientId,
     cursor_membership_type: data.cursorMembershipType,
+    gemini_project_id: data.geminiProjectId,
+    gemini_user_tier: data.geminiUserTier,
+    gemini_api_base: data.geminiApiBase,
   };
 }
 
@@ -70,6 +77,9 @@ export function storageToToken(storage: TokenStorage): TokenData {
     cursorConfigVersion: storage.cursor_config_version,
     cursorClientId: storage.cursor_client_id,
     cursorMembershipType: storage.cursor_membership_type,
+    geminiProjectId: storage.gemini_project_id,
+    geminiUserTier: storage.gemini_user_tier,
+    geminiApiBase: storage.gemini_api_base,
   };
 }
 
@@ -99,7 +109,9 @@ export function loadAllTokens(
     return (
       f.startsWith("claude-") ||
       f.startsWith("codex-") ||
-      f.startsWith("cursor-")
+      f.startsWith("cursor-") ||
+      f.startsWith("copilot-") ||
+      f.startsWith("gemini-")
     );
   });
   const tokens: TokenData[] = [];

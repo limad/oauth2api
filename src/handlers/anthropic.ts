@@ -61,6 +61,7 @@ async function proxyCodexMessages(args: {
 
   await proxyWithRetry("Messages(codex)", resp, config, {
     manager: provider.manager,
+    profile: req.header("x-auth2api-profile") || undefined,
     upstream: (account, signal) =>
       provider.callMessages({
         body: responsesBody,
@@ -220,6 +221,7 @@ export function createMessagesHandler(
 
       await proxyWithRetry("Messages", resp, config, {
         manager: provider.manager,
+        profile: req.header("x-auth2api-profile") || undefined,
         upstream: (account, signal) => {
           const cloaked =
             provider.applyCloaking?.({
@@ -289,6 +291,7 @@ export function createCountTokensHandler(
       const callCountTokens = provider.callCountTokens.bind(provider);
       await proxyWithRetry("CountTokens", resp, config, {
         manager: provider.manager,
+        profile: req.header("x-auth2api-profile") || undefined,
         upstream: (account, signal) =>
           callCountTokens({ request: req, account, config, signal }),
         success: async (upstream, account) => {

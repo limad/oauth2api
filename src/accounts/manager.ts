@@ -1,3 +1,4 @@
+import { createHash } from "crypto";
 import { ProviderId, TokenData } from "../auth/types";
 import { saveToken, loadAllTokens } from "../auth/token-storage";
 import { getDeviceId } from "../utils/common";
@@ -329,6 +330,32 @@ export class AccountManager {
     }
 
     saveToken(this.authDir, token);
+  }
+
+  private profileIdForEmail(email: string): string {
+    return `${this.provider}:${createHash("sha1")
+      .update(`${this.provider}:${email}`)
+      .digest("hex")}`;
+  }
+
+  getAccountByProfileId(profileId: string): AccountResult {
+    const email = this.accountOrder.find((item) => this.profileIdForEmail(item) === profileId);
+    if (!email) {
+      return { account: null, failureKind: null, retryAfterMs: null };
+    }
+    const acct = this.accounts.get(email)!;
+    const now = Date.now();
+    if (acct.cooldownUntil > now) {
+      const kind = acct.lastFailureKind ?? "network";
+      return {
+        account: null,
+        failureKind: kind,
+        retryAfterMs: kind === "auth" || kind === "forbidden" ? null : Math.max(0, acct.cooldownUntil - now),
+      };
+    }
+    return {
+      account: buildAvailableAccount(this.authDir, email, acct.token, this.provider),
+    };
   }
 
   /**
