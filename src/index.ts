@@ -167,11 +167,18 @@ async function startServer(): Promise<void> {
     process.exit(1);
   }
 
+  // Start unconditionally, even for a provider with 0 accounts at boot: an
+  // account can be added later via /admin/reload (e.g. a `--login` done
+  // while this process is already running), and startAutoRefresh/
+  // startStatsLogger are both no-ops on an empty account map, so there is
+  // no cost to having the timer already ticking when that happens. Gating
+  // this on accountCount > 0 previously meant a provider that gained its
+  // first account after boot never got a refresh timer at all, silently,
+  // until the process was restarted — its OAuth token would then expire
+  // with no automatic renewal despite a valid refresh_token on disk.
   for (const p of registry.all()) {
-    if (p.manager.accountCount > 0) {
-      p.manager.startAutoRefresh();
-      p.manager.startStatsLogger();
-    }
+    p.manager.startAutoRefresh();
+    p.manager.startStatsLogger();
   }
 
   let statsRecorder: StatsRecorder | undefined;
