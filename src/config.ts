@@ -56,6 +56,8 @@ export interface Config {
   port: number;
   "auth-dir": string;
   "api-keys": Set<string>;
+  // Client IPs / IPv4-IPv6 CIDRs allowed to connect. Empty = no restriction.
+  "allowed-ips": string[];
   "body-limit": string;
   cloaking: CloakingConfig;
   timeouts: TimeoutConfig;
@@ -66,6 +68,7 @@ export interface Config {
 // Raw config shape from YAML (api-keys is an array, not a Set)
 interface RawConfig extends Omit<Config, "api-keys"> {
   "api-keys": string[];
+  "allowed-ips": string[];
 }
 
 const DEFAULT_RAW: RawConfig = {
@@ -73,6 +76,7 @@ const DEFAULT_RAW: RawConfig = {
   port: 8317,
   "auth-dir": "~/.auth2api",
   "api-keys": [],
+  "allowed-ips": [],
   "body-limit": "200mb",
   cloaking: {
     "cli-version": "2.1.88",
@@ -136,6 +140,9 @@ export function loadConfig(configPath?: string): Config {
   }
 
   raw.debug = normalizeDebugMode(raw.debug);
+  raw["allowed-ips"] = Array.isArray(raw["allowed-ips"])
+    ? raw["allowed-ips"].map((e) => String(e).trim()).filter(Boolean)
+    : [];
 
   // Auto-generate API key if none configured
   if (!raw["api-keys"] || raw["api-keys"].length === 0) {

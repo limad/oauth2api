@@ -1,4 +1,5 @@
 import express from "express";
+import net from "net";
 import { Config, isDebugLevel } from "./config";
 import { ProviderRegistry } from "./providers/registry";
 import { extractApiKey, hashApiKey } from "./utils/common";
@@ -46,12 +47,57 @@ const cleanupTimer = setInterval(
 );
 cleanupTimer.unref();
 
+// Build an IP allow-list matcher from entries like "192.168.1.50",
+// "192.168.1.0/24" or "fd00::/8". Returns null when the list is empty (open).
+export function buildIpAllowList(
+  entries: string[],
+): ((ip: string, selfIp: string) => boolean) | null {
+  if (entries.length === 0) return null;
+  const list = new net.BlockList();
+  for (const e of entries) {
+    const [addr, prefix] = e.split("/");
+    const family = net.isIPv6(addr) ? "ipv6" : net.isIPv4(addr) ? "ipv4" : null;
+    if (!family) {
+      console.error(`[allowed-ips] ignoring invalid entry: ${e}`);
+      continue;
+    }
+    if (prefix === undefined) list.addAddress(addr, family);
+    else list.addSubnet(addr, parseInt(prefix, 10), family);
+  }
+  const norm = (ip: string) => ip.replace(/^::ffff:/i, "");
+  const check = (ip: string) => {
+    const a = norm(ip);
+    const family = net.isIPv6(a) ? "ipv6" : net.isIPv4(a) ? "ipv4" : null;
+    return family !== null && list.check(a, family);
+  };
+  return (ip, selfIp) => {
+    const a = norm(ip);
+    // Loopback and self-connections (the Ollama facade calling our own /v1)
+    // are always allowed; a remote host cannot present our own address.
+    if (a === "127.0.0.1" || a === "::1" || a === norm(selfIp)) return true;
+    return check(a);
+  };
+}
+
 export function createServer(
   config: Config,
   registry: ProviderRegistry,
   statsRecorder?: StatsRecorder,
 ): express.Application {
   const app = express();
+
+  const isAllowedIp = buildIpAllowList(config["allowed-ips"]);
+  if (isAllowedIp) {
+    app.use((req, res, next) => {
+      const ip = req.socket.remoteAddress || "";
+      if (isAllowedIp(ip, req.socket.localAddress || "")) {
+        next();
+        return;
+      }
+      console.error(`[allowed-ips] refused ${ip} ${req.method} ${req.originalUrl}`);
+      res.status(403).json({ error: { message: "Forbidden" } });
+    });
+  }
 
   app.use(express.json({ limit: config["body-limit"] }));
 
