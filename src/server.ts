@@ -12,6 +12,11 @@ import {
   createCountTokensHandler,
 } from "./handlers/anthropic";
 import { StatsRecorder } from "./stats/recorder";
+import {
+  createOllamaRouter,
+  INTERNAL_HEADER,
+  INTERNAL_SECRET,
+} from "./handlers/ollama";
 
 // Simple in-memory rate limiter per IP
 const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
@@ -83,7 +88,13 @@ export function createServer(
   });
 
   // Rate limiting middleware
-  app.use("/v1", (req, res, next) => {
+  app.use(["/v1", "/api"], (req, res, next) => {
+    // Calls made by the Ollama facade to our own /v1 are already rate-limited
+    // once on /api with the real client IP.
+    if (req.header(INTERNAL_HEADER) === INTERNAL_SECRET) {
+      next();
+      return;
+    }
     const ip = req.ip || req.socket.remoteAddress || "unknown";
     if (!rateLimit(ip)) {
       res.status(429).json({ error: { message: "Too many requests" } });
@@ -246,6 +257,20 @@ export function createServer(
       generated_at: new Date().toISOString(),
     });
   });
+
+  // Ollama-compatible facade (/api/*), translated onto /v1. Ollama clients
+  // must send the API key as "Authorization: Bearer <key>".
+  app.get("/", (_req, res) => {
+    res.type("text/plain").send("Ollama is running");
+  });
+  app.use(
+    "/api",
+    requireApiKey,
+    statsFinishMiddleware,
+    // Ollama clients (and plain `curl -d`) don't always send a JSON content-type.
+    express.json({ limit: config["body-limit"], type: () => true }),
+    createOllamaRouter(),
+  );
 
   app.use(["/v1", "/codex", "/backend-api/codex"], requireApiKey);
   app.use(["/v1", "/codex", "/backend-api/codex"], statsFinishMiddleware);
