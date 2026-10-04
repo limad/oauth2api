@@ -219,7 +219,17 @@ async function startServer(): Promise<void> {
   });
 }
 
+function assertSupportedNodeVersion(): void {
+  const major = Number(process.versions.node.split(".", 1)[0]);
+  if (!Number.isInteger(major) || major < 20) {
+    throw new Error(
+      `oauth2api requires Node.js >=20; current version is ${process.version}`,
+    );
+  }
+}
+
 async function main(): Promise<void> {
+  assertSupportedNodeVersion();
   const args = process.argv.slice(2);
   const configPath = args.find((a) => a.startsWith("--config="))?.split("=")[1];
   const config = loadConfig(configPath);
