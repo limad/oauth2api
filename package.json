@@ -2,7 +2,7 @@
   "name": "oauth2api",
   "version": "1.0.0",
   "private": true,
-  "description": "Lightweight Claude OAuth to OpenAI-compatible API proxy",
+  "description": "OAuth-to-API proxy fork for Jeedom ai_auth2api",
   "main": "dist/index.js",
   "engines": {
     "node": ">=20"
