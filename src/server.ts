@@ -304,19 +304,21 @@ export function createServer(
     });
   });
 
-  // Ollama-compatible facade (/api/*), translated onto /v1. Ollama clients
-  // must send the API key as "Authorization: Bearer <key>".
-  app.get("/", (_req, res) => {
-    res.type("text/plain").send("Ollama is running");
-  });
-  app.use(
-    "/api",
-    requireApiKey,
-    statsFinishMiddleware,
-    // Ollama clients (and plain `curl -d`) don't always send a JSON content-type.
-    express.json({ limit: config["body-limit"], type: () => true }),
-    createOllamaRouter(),
-  );
+  // Ollama-compatible facade (/api/*), translated onto /v1. Opt-in via
+  // `ollama-facade: true`. Clients must send "Authorization: Bearer <key>".
+  if (config["ollama-facade"] === true) {
+    app.get("/", (_req, res) => {
+      res.type("text/plain").send("Ollama is running");
+    });
+    app.use(
+      "/api",
+      requireApiKey,
+      statsFinishMiddleware,
+      // Ollama clients (and plain `curl -d`) don't always send a JSON content-type.
+      express.json({ limit: config["body-limit"], type: () => true }),
+      createOllamaRouter(),
+    );
+  }
 
   app.use(["/v1", "/codex", "/backend-api/codex"], requireApiKey);
   app.use(["/v1", "/codex", "/backend-api/codex"], statsFinishMiddleware);

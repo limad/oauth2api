@@ -58,6 +58,8 @@ export interface Config {
   "api-keys": Set<string>;
   // Client IPs / IPv4-IPv6 CIDRs allowed to connect. Empty = no restriction.
   "allowed-ips": string[];
+  // Ollama-compatible facade (/api/*, GET /). Off unless explicitly enabled.
+  "ollama-facade"?: boolean;
   "body-limit": string;
   cloaking: CloakingConfig;
   timeouts: TimeoutConfig;
@@ -140,6 +142,7 @@ export function loadConfig(configPath?: string): Config {
   }
 
   raw.debug = normalizeDebugMode(raw.debug);
+  raw["ollama-facade"] = raw["ollama-facade"] === true;
   raw["allowed-ips"] = Array.isArray(raw["allowed-ips"])
     ? raw["allowed-ips"].map((e) => String(e).trim()).filter(Boolean)
     : [];

@@ -65,3 +65,6 @@ cloaking:
     # agent-base-url is the legacy alias; both keys point at api2.cursor.sh now.
     agent-base-url: "https://api2.cursor.sh"
     api-base-url: "https://api2.cursor.sh"
+
+# Ollama-compatible facade (/api/chat, /api/generate, /api/tags...). Off by default.
+ollama-facade: false

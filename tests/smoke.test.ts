@@ -2241,3 +2241,32 @@ test("codex /v1/responses non-stream prefers upstream-populated output over stre
     "FROM_COMPLETED",
   );
 });
+
+test("ollama facade is mounted only when ollama-facade is true", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "oauth2api-ollama-"));
+  const manager = makeManager(authDir, [makeToken()]);
+  t.after(() => fs.rmSync(authDir, { recursive: true, force: true }));
+  const headers = { authorization: "Bearer test-key" };
+
+  const off = await startApp(makeConfig(authDir), manager);
+  t.after(() => stopApp(off));
+  assert.notEqual(
+    (await requestText({ server: off, method: "GET", path: "/api/version", headers })).status,
+    200,
+  );
+  assert.notEqual(
+    (await requestText({ server: off, method: "GET", path: "/" })).body,
+    "Ollama is running",
+  );
+
+  const on = await startApp({ ...makeConfig(authDir), "ollama-facade": true }, manager);
+  t.after(() => stopApp(on));
+  assert.equal(
+    (await requestText({ server: on, method: "GET", path: "/api/version", headers })).status,
+    200,
+  );
+  assert.equal(
+    (await requestText({ server: on, method: "GET", path: "/" })).body,
+    "Ollama is running",
+  );
+});
