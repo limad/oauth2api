@@ -86,7 +86,7 @@ export function createServer(
 ): express.Application {
   const app = express();
 
-  const isAllowedIp = buildIpAllowList(config["allowed-ips"]);
+  const isAllowedIp = buildIpAllowList(config["allowed-ips"] ?? []);
   if (isAllowedIp) {
     app.use((req, res, next) => {
       const ip = req.socket.remoteAddress || "";
