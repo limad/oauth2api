@@ -3,7 +3,9 @@ import { AccountManager } from "../accounts/manager";
 const BASE_URL = "https://chatgpt.com/backend-api";
 const MODELS_PATH = "/codex/models";
 const CACHE_TTL_MS = 5 * 60 * 1000; // matches codex-rs/models-manager DEFAULT_MODEL_CACHE_TTL
-const CLIENT_VERSION = "auth2api/1.0.0";
+// The backend validates client_version as plain semver (a "name/x.y.z" string
+// is rejected with 400 "Invalid client_version format"); mimic a codex-cli release.
+const CLIENT_VERSION = "0.153.4";
 
 // Static fallback used when no account is loaded or the upstream /codex/models
 // call fails. User-confirmed list of models currently accepted by the

@@ -1,6 +1,6 @@
 {
   "name": "oauth2api",
-  "version": "0.9.11",
+  "version": "0.9.12",
   "private": true,
   "description": "OAuth-to-API proxy fork for Jeedom ai_auth2api",
   "main": "dist/index.js",
