@@ -1,6 +1,6 @@
 {
   "name": "oauth2api",
-  "version": "0.9.12",
+  "version": "0.9.13",
   "private": true,
   "description": "OAuth-to-API proxy fork for Jeedom ai_auth2api",
   "main": "dist/index.js",
@@ -19,7 +19,7 @@
   "dependencies": {
     "express": "^4.21.0",
     "js-yaml": "^4.1.0",
-    "uuid": "^10.0.0"
+    "uuid": "^11.1.1"
   },
   "devDependencies": {
     "@types/express": "^4.17.21",
@@ -29,5 +29,8 @@
     "prettier": "^3.8.1",
     "tsx": "^4.19.0",
     "typescript": "^5.5.0"
+  },
+  "overrides": {
+    "qs": "^6.16.0"
   }
 }
