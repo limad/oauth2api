@@ -15,6 +15,27 @@ Keep the GitHub repository private unless public release is explicitly authorize
 
 The Codex `/codex/models` request currently receives `400 Invalid client_version format` from the upstream endpoint. This is recorded as an open fork issue and is deliberately not changed by the phase-2 repository/CI deliverables.
 
+## Model routing and prefixes
+
+`/v1/models` lists the models of every logged-in provider. When two backends serve the
+same model name, pick the backend with an explicit prefix:
+
+| Prefix | Backend | Example |
+|---|---|---|
+| `ag/` | Antigravity (Google Code Assist) | `ag/claude-sonnet-5-5-medium`, `ag/gpt-oss-120b-medium` |
+| `at/` | Anthropic (native OAuth) | `at/claude-sonnet-4-6` |
+| `cr/` | Cursor | `cr/<model>` |
+
+- Gemini ids work bare (`gemini-3.8-flash-medium`) or as `ag/gemini-...`; every other
+  Antigravity model (Claude, gpt-oss) is advertised and routed **only** as `ag/<id>`.
+  A bare `claude-*` always goes to the native Anthropic provider.
+- The Antigravity catalogue is not hardcoded: it comes from `fetchAvailableModels`, per account
+  (plan-dependent), cached 10 min in memory, refreshed hourly and persisted to
+  `<auth-dir>/gemini-models.json`. It is empty until the first successful fetch.
+- Each Antigravity entry carries `display_name`, `context_length`, `max_completion_tokens`,
+  `capabilities` (vision, pdf, audioInput, videoInput, tools, reasoning, ...) and
+  `quota: {remaining_fraction, reset_time}` (quota window of that model group).
+
 ## Node.js requirement
 
 Node.js `>=20` is required (`engines.node` in `package.json`). The executable checks the running major version before loading configuration or starting OAuth/server work and exits with an explicit error on older Node.js versions. The release workflow runs on Node.js 22 and smoke-checks the built executable with a temporary, empty auth directory.
