@@ -13,9 +13,34 @@ test("parseAvailableModels keeps chat models and drops internal/tab/tiered/image
       "gemini-3.1-flash-image": { displayName: "Image", apiProvider: "API_PROVIDER_GOOGLE_GEMINI" },
     },
   });
-  assert.deepEqual(out, [
-    { id: "gemini-3.8-flash-medium", owned_by: "google" },
-    { id: "claude-sonnet-4-6", owned_by: "antigravity" },
+  assert.deepEqual(out.map((m) => [m.id, m.owned_by]), [
+    ["gemini-3.8-flash-medium", "google"],
+    ["claude-sonnet-4-6", "antigravity"],
   ]);
   assert.deepEqual(parseAvailableModels(null), []);
+});
+
+test("parseAvailableModels maps limits, capabilities and quota", () => {
+  const [m] = parseAvailableModels({
+    models: {
+      "gemini-3.8-flash-medium": {
+        displayName: "G",
+        apiProvider: "API_PROVIDER_GOOGLE_GEMINI",
+        supportsImages: true,
+        supportsThinking: true,
+        supportsVideo: true,
+        maxTokens: 1048576,
+        maxOutputTokens: 65536,
+        supportedMimeTypes: { "application/pdf": true, "audio/wav": true },
+        quotaInfo: { remainingFraction: 0.5, resetTime: "2026-10-11T00:00:00Z" },
+      },
+    },
+  });
+  assert.equal(m.context_length, 1048576);
+  assert.equal(m.max_completion_tokens, 65536);
+  assert.deepEqual(m.quota, { remaining_fraction: 0.5, reset_time: "2026-10-11T00:00:00Z" });
+  assert.equal((m.capabilities as any).pdf, true);
+  assert.equal((m.capabilities as any).audioInput, true);
+  assert.equal((m.capabilities as any).videoInput, true);
+  assert.equal((m.capabilities as any).reasoning, true);
 });

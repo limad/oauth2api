@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { AccountManager } from "../accounts/manager";
+import type { ModelInfo } from "../providers/types";
 import { authHeaders, V1_INTERNAL_BASES, methodUrl } from "./gemini-api";
 
 // `fetchAvailableModels` is what Antigravity itself calls at startup (captured
@@ -17,22 +18,48 @@ function ownedBy(apiProvider: string | undefined): string {
 /** Keeps user-selectable chat models; drops internal/tab/completion backends. */
 export function parseAvailableModels(
   data: any,
-): Array<{ id: string; owned_by: string }> {
-  const out: Array<{ id: string; owned_by: string }> = [];
+): ModelInfo[] {
+  const out: ModelInfo[] = [];
   const models = data?.models;
   if (!models || typeof models !== "object") return out;
   for (const [id, m] of Object.entries<any>(models)) {
     if (!m?.displayName || m.apiProvider === "API_PROVIDER_INTERNAL") continue;
     if (/^(tab_|chat_)/.test(id) || /-tiered$/.test(id)) continue;
     if (/image/.test(id)) continue; // image generation: not a chat model
-    out.push({ id, owned_by: ownedBy(m.apiProvider) });
+    const mime = m.supportedMimeTypes || {};
+    const hasMime = (re: RegExp) => Object.keys(mime).some((k) => re.test(k));
+    const info: ModelInfo = {
+      id,
+      owned_by: ownedBy(m.apiProvider),
+      display_name: m.displayName,
+      capabilities: {
+        vision: !!m.supportsImages || hasMime(/^image\//),
+        pdf: !!mime["application/pdf"],
+        audioInput: hasMime(/^audio\//),
+        videoInput: !!m.supportsVideo,
+        tools: true,
+        reasoning: !!m.supportsThinking,
+        thinkingBudget: m.thinkingBudget,
+        contextWindow: m.maxTokens,
+        maxOutput: m.maxOutputTokens,
+      },
+    };
+    if (m.maxTokens) info.context_length = m.maxTokens;
+    if (m.maxOutputTokens) info.max_completion_tokens = m.maxOutputTokens;
+    if (typeof m.quotaInfo?.remainingFraction === "number") {
+      info.quota = {
+        remaining_fraction: m.quotaInfo.remainingFraction,
+        reset_time: m.quotaInfo.resetTime,
+      };
+    }
+    out.push(info);
   }
   return out;
 }
 
 async function fetchForAccount(
   token: { accessToken: string; geminiProjectId?: string; geminiApiBase?: string },
-): Promise<Array<{ id: string; owned_by: string }> | null> {
+): Promise<ModelInfo[] | null> {
   const base = token.geminiApiBase || V1_INTERNAL_BASES[0];
   try {
     const resp = await fetch(methodUrl(base, "fetchAvailableModels"), {
@@ -62,7 +89,7 @@ const REFRESH_MS = 60 * 60 * 1000;
  * Empty until the first successful fetch when there is no persisted copy.
  */
 export class GeminiCatalog {
-  private models: Array<{ id: string; owned_by: string }> = [];
+  private models: ModelInfo[] = [];
   private fetchedAt = 0;
   private timer: NodeJS.Timeout | null = null;
   private readonly file: string;
@@ -80,7 +107,7 @@ export class GeminiCatalog {
     }
   }
 
-  private set(models: Array<{ id: string; owned_by: string }>, at: number): void {
+  private set(models: ModelInfo[], at: number): void {
     this.models = models;
     this.fetchedAt = at;
   }
@@ -110,7 +137,7 @@ export class GeminiCatalog {
     }
   }
 
-  async list(): Promise<Array<{ id: string; owned_by: string }>> {
+  async list(): Promise<ModelInfo[]> {
     if (Date.now() - this.fetchedAt > CACHE_TTL_MS) await this.refresh();
     return this.models;
   }
