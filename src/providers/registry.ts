@@ -1,5 +1,5 @@
 import { ProviderId } from "../auth/types";
-import { resolveModel } from "../upstream/translator";
+import { ANTHROPIC_PREFIX, resolveModel } from "../upstream/translator";
 import { buildAnthropicProvider } from "./anthropic";
 import { buildCodexProvider } from "./codex";
 import { buildCursorProvider } from "./cursor";
@@ -38,6 +38,8 @@ export function buildRegistry(authDir: string): ProviderRegistry {
       return p;
     },
     forModel: (model) => {
+      // `at/<id>` forces the native Anthropic backend (prefix stripped by resolveModel).
+      if (model.startsWith(ANTHROPIC_PREFIX)) return anthropic;
       const resolved = resolveModel(model);
       // Explicit `cursor-` / `cr/` prefix always wins so users can force the
       // Cursor backend when they have multiple providers logged in.

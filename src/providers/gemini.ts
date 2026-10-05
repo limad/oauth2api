@@ -7,6 +7,8 @@ import {
   GEMINI_CALLBACK_PATH,
   GEMINI_CALLBACK_PORT,
 } from "../auth/gemini/oauth";
+import { ANTIGRAVITY_PREFIX } from "../upstream/translator";
+import { GeminiCatalog } from "../upstream/gemini-models";
 import { resolveGeminiProject, callGeminiMessages } from "../upstream/gemini-api";
 import { Provider, UpstreamCallContext, ProviderOAuthInfo } from "./types";
 
@@ -17,37 +19,13 @@ const GEMINI_OAUTH: ProviderOAuthInfo = {
 
 const MODEL_RE = /^(gemini|gemma)[-/:]/i;
 
-// The Code Assist backend isn't Gemini-only under the Antigravity
-// entitlement — it also dispatches to Claude and an open-weight GPT model
-// through the exact same `:generateContent` RPC and `contents/parts`
-// envelope (verified against Draculabo/AntigravityManager's
-// model-specs.ts, where these three sit in the same `models` map as every
-// Gemini id, same shape: max_output_tokens/thinking_budget/is_thinking).
-// Matched by exact id (not a prefix like MODEL_RE) so a bare "claude-sonnet-4-6"
-// still routes to the native `anthropic` OAuth provider — only the
-// Antigravity-flavored "-thinking"/full ids opt into this backend.
-const ANTIGRAVITY_EXTRA_MODELS = new Set([
-  "claude-sonnet-4-6-thinking",
-  "claude-opus-4-6-thinking",
-  "gpt-oss-120b-medium",
-]);
-
-// Real Code Assist backend ids (per resolveGeminiModel in
-// upstream/gemini-translator.ts) plus the friendly "gemini-3.1-pro" alias
-// that maps to "-high" — matches what Antigravity's own model picker
-// exposes (captured 2026-08-23: "Gemini 3.1 Pro / Low", flash tiers 3.5/3.6/3.7,
-// plus the Claude/GPT-OSS entries above).
-const ADVERTISED_MODELS = [
-  "gemini-3.1-pro",
-  "gemini-3.1-pro-low",
-  "gemini-3.5-flash-high",
-  "gemini-3.5-flash-medium",
-  "gemini-3.5-flash-low",
-  "gemini-3-flash",
-  "claude-sonnet-4-6-thinking",
-  "claude-opus-4-6-thinking",
-  "gpt-oss-120b-medium",
-];
+// The Code Assist backend isn't Gemini-only under the Antigravity entitlement —
+// it also serves Claude and gpt-oss. Which ids exist depends on the account, so
+// they come from the live catalogue (upstream/gemini-models.ts). To avoid clashing
+// with the native providers (a bare "claude-sonnet-4-6" is Anthropic), every
+// non-Gemini model is exposed and routed ONLY under the explicit `ag/` prefix
+// (`ag/claude-sonnet-5-5-medium`); `at/` forces Anthropic. Gemini ids work bare or
+// as `ag/gemini-...`.
 
 export function buildGeminiProvider(authDir: string): Provider {
   const manager = new AccountManager(authDir, {
@@ -57,6 +35,9 @@ export function buildGeminiProvider(authDir: string): Provider {
       return { ...token, provider: "gemini" };
     },
   });
+  const catalog = new GeminiCatalog(manager, authDir);
+  // Accounts are loaded right after construction; first live fetch shortly after.
+  setTimeout(() => catalog.start(), 3000).unref();
 
   return {
     id: "gemini",
@@ -70,7 +51,7 @@ export function buildGeminiProvider(authDir: string): Provider {
     manager,
     oauth: GEMINI_OAUTH,
     matchesModel: (model: string) =>
-      MODEL_RE.test(model) || ANTIGRAVITY_EXTRA_MODELS.has(model),
+      MODEL_RE.test(model) || model.startsWith(ANTIGRAVITY_PREFIX),
     buildAuthUrl: (state: string, pkce: PKCECodes) =>
       generateGeminiAuthURL(state, pkce),
     exchangeCode: async (code, returnedState, expectedState, pkce) => {
@@ -97,10 +78,9 @@ export function buildGeminiProvider(authDir: string): Provider {
       };
     },
     listModels: async () =>
-      ADVERTISED_MODELS.map((id) => ({
-        id,
-        owned_by: ANTIGRAVITY_EXTRA_MODELS.has(id) ? "antigravity" : "google",
-      })),
+      (await catalog.list()).map((m) =>
+        MODEL_RE.test(m.id) ? m : { ...m, id: `${ANTIGRAVITY_PREFIX}${m.id}` },
+      ),
     callMessages: (opts: UpstreamCallContext) =>
       callGeminiMessages({
         body: opts.body,

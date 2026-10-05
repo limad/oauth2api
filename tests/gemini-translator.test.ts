@@ -13,8 +13,8 @@ import {
 // ───────────────── resolveGeminiModel ─────────────────
 
 test("resolveGeminiModel: maps friendly names to real Code Assist backend ids", () => {
-  assert.equal(resolveGeminiModel("gemini-3.1-pro"), "gemini-3.1-pro-high");
-  assert.equal(resolveGeminiModel("gemini-2.5-pro"), "gemini-3.1-pro-high");
+  assert.equal(resolveGeminiModel("gemini-3.1-pro"), "gemini-pro-agent");
+  assert.equal(resolveGeminiModel("gemini-2.5-pro"), "gemini-pro-agent");
   assert.equal(resolveGeminiModel("gemini-2.5-flash"), "gemini-3-flash");
 });
 

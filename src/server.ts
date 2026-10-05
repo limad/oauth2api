@@ -328,10 +328,9 @@ export function createServer(
     const lists = await Promise.all(providers.map((p) => p.listModels()));
     const data = lists.flatMap((models) =>
       models.map((m) => ({
-        id: m.id,
+        ...m,
         object: "model",
         created,
-        owned_by: m.owned_by,
       })),
     );
     res.json({ object: "list", data });

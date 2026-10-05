@@ -53,7 +53,12 @@ const MODEL_ALIASES: Record<string, string> = {
   "claude-haiku-4-5": "claude-haiku-4-5-20251001",
 };
 
+/** Explicit routing prefixes: `at/<id>` forces Anthropic, `ag/<id>` forces Antigravity (Code Assist). */
+export const ANTHROPIC_PREFIX = "at/";
+export const ANTIGRAVITY_PREFIX = "ag/";
+
 export function resolveModel(model: string): string {
+  if (model.startsWith(ANTHROPIC_PREFIX)) model = model.slice(ANTHROPIC_PREFIX.length);
   return MODEL_ALIASES[model] ?? model;
 }
 
