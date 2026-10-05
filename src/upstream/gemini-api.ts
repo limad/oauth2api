@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { Request } from "express";
 import { Config } from "../config";
 import { AvailableAccount } from "../accounts/manager";
@@ -21,10 +22,12 @@ import {
 // sandbox/daily over prod and falls back on failure. Mirrored here for the
 // same reason (Ref their issue #1176).
 const V1_INTERNAL_BASES = [
-  "https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal",
   "https://daily-cloudcode-pa.googleapis.com/v1internal",
+  "https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal",
   "https://cloudcode-pa.googleapis.com/v1internal",
 ];
+
+const SESSION_ID = String(-Math.floor(Math.random() * 2 ** 53));
 
 function methodUrl(base: string, method: string): string {
   return `${base}:${method}`;
@@ -34,10 +37,11 @@ function methodUrl(base: string, method: string): string {
 // than just the OAuth client_id — lbjlaq/Antigravity-Manager sends a
 // User-Agent that mimics the real Antigravity Electron app on every
 // v1internal call. Value below is the exact string captured from a live
-// Antigravity install's own traffic (2026-08-23), not the community repo's
-// fallback constant, so it should be at least as current.
+// Antigravity install's own traffic, not the community repo's fallback
+// constant. Updated 2026-10-05 from a mitmproxy capture of Antigravity CLI
+// 1.2.17 (the real client sends only User-Agent/Authorization/Content-Type).
 const ANTIGRAVITY_USER_AGENT =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Antigravity/2.9.1 Chrome/146.0.7680.72 Electron/41.0.2 Safari/537.36";
+  "antigravity/cli/1.2.17 (aidev_client; os_type=windows; arch=amd64; cl=993434119; auth_method=consumer)";
 
 function authHeaders(accessToken: string): Record<string, string> {
   return {
@@ -50,10 +54,9 @@ function authHeaders(accessToken: string): Record<string, string> {
 // ideType "ANTIGRAVITY" (rather than gemini-cli's "IDE_UNSPECIFIED") is
 // what actually keeps the free "Code Assist for individuals" tier eligible
 // under this OAuth client — see docs/gemini-code-assist-notes.md.
+// The real Antigravity CLI sends exactly `{"metadata":{"ideType":"ANTIGRAVITY"}}`.
 const CLIENT_METADATA = {
   ideType: "ANTIGRAVITY",
-  platform: "PLATFORM_UNSPECIFIED",
-  pluginType: "GEMINI",
 };
 
 /**
@@ -268,16 +271,22 @@ export async function callGeminiMessages(
   const { contents, systemInstruction, tools, toolConfig, generationConfig } =
     anthropicToGeminiContents(body);
 
+  // Envelope as sent by the real Antigravity CLI 1.2.17 (mitmproxy capture,
+  // requestType "agent"): requestId is "agent/<uuid>", userAgent is the fixed
+  // string "antigravity", sessionId is a stable per-process negative integer.
   const envelope = {
-    model: resolvedModel,
     project: projectId,
-    user_prompt_id: `auth2api-${Date.now().toString(36)}`,
+    requestId: `agent/${randomUUID()}`,
+    model: resolvedModel,
+    userAgent: "antigravity",
+    requestType: "agent",
     request: {
       contents,
       systemInstruction,
       tools,
       toolConfig,
       generationConfig,
+      sessionId: SESSION_ID,
     },
   };
 
