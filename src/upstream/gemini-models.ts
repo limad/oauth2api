@@ -63,7 +63,6 @@ const REFRESH_MS = 60 * 60 * 1000;
  */
 export class GeminiCatalog {
   private models: Array<{ id: string; owned_by: string }> = [];
-  private ids = new Set<string>();
   private fetchedAt = 0;
   private timer: NodeJS.Timeout | null = null;
   private readonly file: string;
@@ -83,7 +82,6 @@ export class GeminiCatalog {
 
   private set(models: Array<{ id: string; owned_by: string }>, at: number): void {
     this.models = models;
-    this.ids = new Set(models.map((m) => m.id));
     this.fetchedAt = at;
   }
 
@@ -115,10 +113,5 @@ export class GeminiCatalog {
   async list(): Promise<Array<{ id: string; owned_by: string }>> {
     if (Date.now() - this.fetchedAt > CACHE_TTL_MS) await this.refresh();
     return this.models;
-  }
-
-  /** Non-Gemini ids (Claude "-low/-medium/-high/-thinking", gpt-oss…) served by this backend. */
-  has(id: string): boolean {
-    return this.ids.has(id);
   }
 }

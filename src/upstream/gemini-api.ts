@@ -3,6 +3,7 @@ import { Request } from "express";
 import { Config } from "../config";
 import { AvailableAccount } from "../accounts/manager";
 import { withTimeoutSignal } from "../utils/abort";
+import { ANTIGRAVITY_PREFIX } from "./translator";
 import { readSseEvents } from "./streaming";
 import {
   anthropicToGeminiContents,
@@ -252,7 +253,9 @@ export async function callGeminiMessages(
   // `resolvedModel` is the real Code Assist backend id sent upstream — see
   // resolveGeminiModel's doc comment for why these can differ.
   const model = body.model || "gemini-3.1-pro";
-  const resolvedModel = resolveGeminiModel(model);
+  const resolvedModel = resolveGeminiModel(
+    model.startsWith(ANTIGRAVITY_PREFIX) ? model.slice(ANTIGRAVITY_PREFIX.length) : model,
+  );
   const stream = !!body.stream;
   const projectId = account.token.geminiProjectId;
   if (!projectId) {

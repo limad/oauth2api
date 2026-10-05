@@ -7,6 +7,7 @@ import {
   GEMINI_CALLBACK_PATH,
   GEMINI_CALLBACK_PORT,
 } from "../auth/gemini/oauth";
+import { ANTIGRAVITY_PREFIX } from "../upstream/translator";
 import { GeminiCatalog } from "../upstream/gemini-models";
 import { resolveGeminiProject, callGeminiMessages } from "../upstream/gemini-api";
 import { Provider, UpstreamCallContext, ProviderOAuthInfo } from "./types";
@@ -19,12 +20,12 @@ const GEMINI_OAUTH: ProviderOAuthInfo = {
 const MODEL_RE = /^(gemini|gemma)[-/:]/i;
 
 // The Code Assist backend isn't Gemini-only under the Antigravity entitlement —
-// it also dispatches Claude and an open-weight GPT model through the same RPC.
-// Which ids exist depends on the account, so they come from the live catalogue
-// (upstream/gemini-models.ts), not from a hardcoded list. Bare Anthropic ids
-// ("claude-sonnet-4-6") keep routing to the native `anthropic` OAuth provider;
-// only Antigravity-flavoured ids ("-low/-medium/-high", "-thinking", gpt-oss) opt in.
-const BARE_ANTHROPIC_ID = /^claude-[a-z]+-\d+(-\d+)*$/;
+// it also serves Claude and gpt-oss. Which ids exist depends on the account, so
+// they come from the live catalogue (upstream/gemini-models.ts). To avoid clashing
+// with the native providers (a bare "claude-sonnet-4-6" is Anthropic), every
+// non-Gemini model is exposed and routed ONLY under the explicit `ag/` prefix
+// (`ag/claude-sonnet-5-5-medium`); `at/` forces Anthropic. Gemini ids work bare or
+// as `ag/gemini-...`.
 
 export function buildGeminiProvider(authDir: string): Provider {
   const manager = new AccountManager(authDir, {
@@ -50,8 +51,7 @@ export function buildGeminiProvider(authDir: string): Provider {
     manager,
     oauth: GEMINI_OAUTH,
     matchesModel: (model: string) =>
-      MODEL_RE.test(model) ||
-      (catalog.has(model) && !BARE_ANTHROPIC_ID.test(model)),
+      MODEL_RE.test(model) || model.startsWith(ANTIGRAVITY_PREFIX),
     buildAuthUrl: (state: string, pkce: PKCECodes) =>
       generateGeminiAuthURL(state, pkce),
     exchangeCode: async (code, returnedState, expectedState, pkce) => {
@@ -77,7 +77,10 @@ export function buildGeminiProvider(authDir: string): Provider {
         geminiApiBase: apiBase,
       };
     },
-    listModels: () => catalog.list(),
+    listModels: async () =>
+      (await catalog.list()).map((m) =>
+        MODEL_RE.test(m.id) ? m : { ...m, id: `${ANTIGRAVITY_PREFIX}${m.id}` },
+      ),
     callMessages: (opts: UpstreamCallContext) =>
       callGeminiMessages({
         body: opts.body,
