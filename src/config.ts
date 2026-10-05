@@ -60,6 +60,8 @@ export interface Config {
   "allowed-ips": string[];
   // Ollama-compatible facade (/api/*, GET /). Off unless explicitly enabled.
   "ollama-facade"?: boolean;
+  // Patterns (`*` wildcard, leading `!` = exclude) of models listed on /v1/models. Empty = all.
+  "expose-models": string[];
   "body-limit": string;
   cloaking: CloakingConfig;
   timeouts: TimeoutConfig;
@@ -79,6 +81,7 @@ const DEFAULT_RAW: RawConfig = {
   "auth-dir": "~/.auth2api",
   "api-keys": [],
   "allowed-ips": [],
+  "expose-models": [],
   "body-limit": "200mb",
   cloaking: {
     "cli-version": "2.1.88",
@@ -143,6 +146,9 @@ export function loadConfig(configPath?: string): Config {
 
   raw.debug = normalizeDebugMode(raw.debug);
   raw["ollama-facade"] = raw["ollama-facade"] === true;
+  raw["expose-models"] = Array.isArray(raw["expose-models"])
+    ? raw["expose-models"].map((e) => String(e).trim()).filter(Boolean)
+    : [];
   raw["allowed-ips"] = Array.isArray(raw["allowed-ips"])
     ? raw["allowed-ips"].map((e) => String(e).trim()).filter(Boolean)
     : [];

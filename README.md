@@ -36,6 +36,22 @@ same model name, pick the backend with an explicit prefix:
   `capabilities` (vision, pdf, audioInput, videoInput, tools, reasoning, ...) and
   `quota: {remaining_fraction, reset_time}` (quota window of that model group).
 
+## Choosing which models are listed
+
+`expose-models` in the config limits what `/v1/models` lists (`*` wildcard, leading `!` excludes,
+empty = everything). It only hides models from the list: a request that names a hidden model is
+still served. `GET /admin/models` (API key required) returns the full catalogue per provider with an
+`exposed` flag per model and the active patterns, so a UI can offer the choice.
+
+```yaml
+expose-models:
+  - "gemini-3.8-*"
+  - "ag/claude-*"
+  - "!*-low"
+```
+
+A change needs a restart (or a new process) to take effect.
+
 ## Node.js requirement
 
 Node.js `>=20` is required (`engines.node` in `package.json`). The executable checks the running major version before loading configuration or starting OAuth/server work and exits with an explicit error on older Node.js versions. The release workflow runs on Node.js 22 and smoke-checks the built executable with a temporary, empty auth directory.

@@ -13,6 +13,7 @@ import {
   createCountTokensHandler,
 } from "./handlers/anthropic";
 import { StatsRecorder } from "./stats/recorder";
+import { compileModelFilter } from "./models-filter";
 import {
   createOllamaRouter,
   INTERNAL_HEADER,
@@ -85,6 +86,7 @@ export function createServer(
   statsRecorder?: StatsRecorder,
 ): express.Application {
   const app = express();
+  const exposeModel = compileModelFilter(config["expose-models"]);
 
   const isAllowedIp = buildIpAllowList(config["allowed-ips"] ?? []);
   if (isAllowedIp) {
@@ -267,6 +269,22 @@ export function createServer(
     });
   });
 
+  // GET /admin/models — full catalogue per provider, ignoring `expose-models`, with
+  // `exposed` telling whether /v1/models currently lists it. Used by the Jeedom plugin
+  // to let the user pick which models to expose.
+  app.get("/admin/models", async (_req, res) => {
+    const providers: Record<string, unknown[]> = {};
+    for (const p of registry.withAccounts()) {
+      const models = await p.listModels();
+      providers[p.id] = models.map((m) => ({ ...m, exposed: exposeModel(m.id) }));
+    }
+    res.json({
+      patterns: config["expose-models"],
+      providers,
+      generated_at: new Date().toISOString(),
+    });
+  });
+
   app.get("/admin/accounts", (_req, res) => {
     const providers: Record<
       string,
@@ -327,7 +345,7 @@ export function createServer(
     const providers = registry.withAccounts();
     const lists = await Promise.all(providers.map((p) => p.listModels()));
     const data = lists.flatMap((models) =>
-      models.map((m) => ({
+      models.filter((m) => exposeModel(m.id)).map((m) => ({
         ...m,
         object: "model",
         created,
