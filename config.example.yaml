@@ -66,5 +66,13 @@ cloaking:
     agent-base-url: "https://api2.cursor.sh"
     api-base-url: "https://api2.cursor.sh"
 
+# Models listed on /v1/models. `*` is a wildcard, a leading `!` excludes. Empty = list everything.
+# This only hides models from the list; a request naming a hidden model is still served.
+# expose-models:
+#   - "gemini-3.8-*"
+#   - "ag/claude-*"
+#   - "!*-low"
+expose-models: []
+
 # Ollama-compatible facade (/api/chat, /api/generate, /api/tags...). Off by default.
 ollama-facade: false
