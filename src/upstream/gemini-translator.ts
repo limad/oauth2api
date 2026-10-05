@@ -26,12 +26,12 @@ function compactUuid(): string {
 // "gemini-3.1-pro-low"). Real backend ids not listed here (already-correct
 // ids, or ones Google adds later) pass through unchanged.
 const GEMINI_MODEL_ALIASES: Record<string, string> = {
-  "gemini-3.1-pro": "gemini-3.1-pro-high",
-  "gemini-3.1-pro-preview": "gemini-3.1-pro-high",
-  "gemini-3.0-pro": "gemini-3.1-pro-high",
+  "gemini-3.1-pro": "gemini-pro-agent",
+  "gemini-3.1-pro-preview": "gemini-pro-agent",
+  "gemini-3.0-pro": "gemini-pro-agent",
   "gemini-3-pro": "gemini-3-pro-preview",
   "gemini-3-pro-high": "gemini-pro-agent",
-  "gemini-2.5-pro": "gemini-3.1-pro-high",
+  "gemini-2.5-pro": "gemini-pro-agent",
   "gemini-2.5-flash": "gemini-3-flash",
   "gemini-2.5-flash-lite": "gemini-3-flash",
   "gemini-2.0-flash": "gemini-3-flash",

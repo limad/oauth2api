@@ -21,7 +21,7 @@ import {
 // lbjlaq/Antigravity-Manager (30k+ stars, actively maintained) prioritises
 // sandbox/daily over prod and falls back on failure. Mirrored here for the
 // same reason (Ref their issue #1176).
-const V1_INTERNAL_BASES = [
+export const V1_INTERNAL_BASES = [
   "https://daily-cloudcode-pa.googleapis.com/v1internal",
   "https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal",
   "https://cloudcode-pa.googleapis.com/v1internal",
@@ -29,7 +29,7 @@ const V1_INTERNAL_BASES = [
 
 const SESSION_ID = String(-Math.floor(Math.random() * 2 ** 53));
 
-function methodUrl(base: string, method: string): string {
+export function methodUrl(base: string, method: string): string {
   return `${base}:${method}`;
 }
 
@@ -43,7 +43,7 @@ function methodUrl(base: string, method: string): string {
 const ANTIGRAVITY_USER_AGENT =
   "antigravity/cli/1.2.17 (aidev_client; os_type=windows; arch=amd64; cl=993434119; auth_method=consumer)";
 
-function authHeaders(accessToken: string): Record<string, string> {
+export function authHeaders(accessToken: string): Record<string, string> {
   return {
     "Content-Type": "application/json",
     Authorization: `Bearer ${accessToken}`,
