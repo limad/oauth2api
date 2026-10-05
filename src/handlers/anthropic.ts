@@ -184,6 +184,9 @@ export function createMessagesHandler(
       const model = resolveModel(body.model || "claude-sonnet-4-6");
       const provider = registry.forModel(model);
       tagStatsModel(resp, model, provider.id);
+      // Send the resolved id upstream: aliases ("haiku", "opus", "at/<id>") are
+      // only known to us, so passing body.model through raw gives a 404 upstream.
+      if (body.model) body.model = model;
 
       // Codex's upstream is the OpenAI Responses API; route /v1/messages
       // through a dedicated translator path that converts Anthropic
