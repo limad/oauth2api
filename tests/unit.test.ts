@@ -1303,3 +1303,32 @@ test("StatsRecorder replay ignores partial schema rows without polluting aggrega
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+import { applyCloaking } from "../src/upstream/cloaking";
+
+test("applyCloaking: injected prefix uses ttl 1h when client blocks are 1h", () => {
+  const cfg: any = { cloaking: {} };
+  const acct: any = { deviceId: "d", accountUuid: "a" };
+  const req: any = { headers: { authorization: "Bearer k" }, body: {} };
+  const out = applyCloaking({
+    request: req, account: acct, config: cfg,
+    body: {
+      system: [{ type: "text", text: "client", cache_control: { type: "ephemeral", ttl: "1h" } }],
+      messages: [{ role: "user", content: "hi" }],
+    },
+  });
+  const prefix = out.system.find((b: any) => String(b.text).startsWith("You are Claude Code"));
+  assert.deepEqual(prefix.cache_control, { type: "ephemeral", ttl: "1h" });
+});
+
+test("applyCloaking: injected prefix stays 5m when no 1h block is present", () => {
+  const cfg: any = { cloaking: {} };
+  const acct: any = { deviceId: "d", accountUuid: "a" };
+  const req: any = { headers: { authorization: "Bearer k" }, body: {} };
+  const out = applyCloaking({
+    request: req, account: acct, config: cfg,
+    body: { system: "plain", messages: [{ role: "user", content: "hi" }] },
+  });
+  const prefix = out.system.find((b: any) => String(b.text).startsWith("You are Claude Code"));
+  assert.deepEqual(prefix.cache_control, { type: "ephemeral" });
+});
