@@ -145,6 +145,38 @@ test("anthropicToGeminiContents: tools[] converts to Gemini functionDeclarations
   ]);
 });
 
+test("anthropicToGeminiContents: type arrays become a single type, nullable or anyOf", () => {
+  const out = anthropicToGeminiContents({
+    messages: [{ role: "user", content: "hi" }],
+    tools: [
+      {
+        name: "t",
+        input_schema: {
+          type: "object",
+          properties: {
+            a: { type: ["string", "null"], description: "maybe" },
+            b: { type: ["null"] },
+            c: { type: ["number", "array", "null"], items: { type: ["integer"] } },
+            const: { type: "string" },
+          },
+        },
+      },
+    ],
+  });
+  assert.deepEqual(out.tools[0].functionDeclarations[0].parameters, {
+    type: "object",
+    properties: {
+      a: { type: "string", description: "maybe", nullable: true },
+      b: { nullable: true },
+      c: {
+        nullable: true,
+        anyOf: [{ type: "number" }, { type: "array", items: { type: "integer" } }],
+      },
+      const: { type: "string" },
+    },
+  });
+});
+
 test("anthropicToGeminiContents: tool_choice maps to functionCallingConfig", () => {
   assert.deepEqual(
     anthropicToGeminiContents({
