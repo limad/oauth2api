@@ -50,6 +50,15 @@ expose-models:
   - "!*-low"
 ```
 
+`model-aliases` (alias → real id) adds extra ids to `/v1/models` (only when the target is listed) and
+rewrites them to the real id on requests; responses (JSON and SSE) carry the alias the client asked for, not the real
+model name. Use it for clients that only accept `claude-*` ids:
+
+```yaml
+model-aliases:
+  claude-gpt-5.5: gpt-5.5
+```
+
 A change needs a restart (or a new process) to take effect.
 
 ## Node.js requirement
