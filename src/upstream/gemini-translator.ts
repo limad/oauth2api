@@ -125,6 +125,10 @@ const UNSUPPORTED_SCHEMA_KEYS = new Set([
   "$schema",
   "unevaluatedProperties",
   "const",
+  "propertyNames",
+  "patternProperties",
+  "exclusiveMinimum",
+  "exclusiveMaximum",
 ]);
 
 function sanitizeSchema(schema: any): any {
