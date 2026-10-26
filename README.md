@@ -63,7 +63,7 @@ A change needs a restart (or a new process) to take effect.
 
 ## Node.js requirement
 
-Node.js `>=20` is required (`engines.node` in `package.json`). The executable checks the running major version before loading configuration or starting OAuth/server work and exits with an explicit error on older Node.js versions. The release workflow runs on Node.js 22 and smoke-checks the built executable with a temporary, empty auth directory.
+Node.js `>=22` (the major version installed by Jeedom core) is required (`engines.node` in `package.json`). The executable checks the running major version before loading configuration or starting OAuth/server work and exits with an explicit error on older Node.js versions. The release workflow runs on Node.js 22 and smoke-checks the built executable with a temporary, empty auth directory.
 
 ## Development
 

@@ -221,9 +221,9 @@ async function startServer(): Promise<void> {
 
 function assertSupportedNodeVersion(): void {
   const major = Number(process.versions.node.split(".", 1)[0]);
-  if (!Number.isInteger(major) || major < 20) {
+  if (!Number.isInteger(major) || major < 22) {
     throw new Error(
-      `oauth2api requires Node.js >=20; current version is ${process.version}`,
+      `oauth2api requires Node.js >=22; current version is ${process.version}`,
     );
   }
 }
