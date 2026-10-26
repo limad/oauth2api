@@ -5,13 +5,17 @@ const MODELS_PATH = "/codex/models";
 const CACHE_TTL_MS = 5 * 60 * 1000; // matches codex-rs/models-manager DEFAULT_MODEL_CACHE_TTL
 // The backend validates client_version as plain semver (a "name/x.y.z" string
 // is rejected with 400 "Invalid client_version format"); mimic a codex-cli release.
-const CLIENT_VERSION = "0.153.4";
+// 0.163.0 is required for gpt-6-luna and newer model listing.
+const CLIENT_VERSION = "0.163.0";
 
 // Static fallback used when no account is loaded or the upstream /codex/models
 // call fails. User-confirmed list of models currently accepted by the
 // ChatGPT-account codex backend; kept private since the upstream proxy is the
 // authoritative source — this list only papers over startup and outages.
 const FALLBACK_MODELS = [
+  "gpt-6-luna",
+  "gpt-5.6-luna",
+  "gpt-5.6-terra",
   "gpt-5.5",
   "gpt-5.4",
   "gpt-5.4-mini",

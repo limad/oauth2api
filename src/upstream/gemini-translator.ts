@@ -37,6 +37,8 @@ const GEMINI_MODEL_ALIASES: Record<string, string> = {
   "gemini-2.0-flash": "gemini-3-flash",
   "gemini-2.0-flash-online": "gemini-3-flash",
   "gemini-3-flash-preview": "gemini-3-flash",
+  "gemini-4-argon": "gemini-4-argon-medium",
+  "gemini-4-argon-preview": "gemini-4-argon-medium",
   "gemini-3-pro-image-preview": "gemini-3-pro-image",
   "gemini-3-flash-image": "gemini-3.1-flash-image",
   "gemini-3.1-flash-image-preview": "gemini-3.1-flash-image",

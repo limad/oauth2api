@@ -16,9 +16,9 @@ const CODEX_OAUTH: ProviderOAuthInfo = {
   callbackPath: CODEX_CALLBACK_PATH,
 };
 
-// gpt-5*, o\d* (o3, o4-mini), codex-* — but NOT legacy gpt-3/gpt-4* which the
+// gpt-5*, gpt-6*, gpt-reserve, o\d* (o3, o4-mini), codex-* — but NOT legacy gpt-3/gpt-4* which the
 // codex backend doesn't serve.
-const MODEL_RE = /^(gpt-5(\.|-)|gpt-5$|o\d|codex-)/i;
+const MODEL_RE = /^(gpt-[56](\.|-)|gpt-[56]$|gpt-reserve|o\d|codex-)/i;
 
 export function buildCodexProvider(authDir: string): Provider {
   const manager = new AccountManager(authDir, {

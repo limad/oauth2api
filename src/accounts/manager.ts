@@ -599,6 +599,18 @@ export class AccountManager {
     return this.accounts.size;
   }
 
+  /** Returns all currently loaded accounts (with device IDs and credentials). */
+  getAllAccounts(): AvailableAccount[] {
+    const out: AvailableAccount[] = [];
+    for (const email of this.accountOrder) {
+      const acct = this.accounts.get(email);
+      if (acct) {
+        out.push(buildAvailableAccount(this.authDir, email, acct.token, this.provider));
+      }
+    }
+    return out;
+  }
+
   private shouldRefresh(acct: AccountState, now: number): boolean {
     // A cooldown means a recent attempt already failed (backoff) or the
     // refresh token was declared permanently unusable (terminal, 24h). In
