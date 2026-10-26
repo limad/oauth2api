@@ -413,6 +413,20 @@ test("detectExhaustedReason recognises documented codes", () => {
     ),
     "invalidated",
   );
+  // Standard OAuth 2.0 bare-string form (Anthropic, Google): terminal, never retryable.
+  assert.equal(
+    detectExhaustedReason(
+      JSON.stringify({
+        error: "invalid_grant",
+        error_description: "Refresh token expired",
+      }),
+    ),
+    "expired",
+  );
+  assert.equal(
+    detectExhaustedReason(JSON.stringify({ error: "invalid_grant" })),
+    "invalidated",
+  );
   // Non-terminal codes / parse failures return null.
   assert.equal(
     detectExhaustedReason(JSON.stringify({ error: { code: "rate_limited" } })),

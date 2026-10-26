@@ -177,17 +177,6 @@ export async function refreshGeminiTokens(
     if (reason) {
       throw new RefreshTokenExhaustedError(reason, resp.status, text);
     }
-    // Google's refresh error shape is {"error":"invalid_grant","error_description":"..."}
-    // — detectExhaustedReason only recognises the OpenAI-style {error:{code}}
-    // shape, so also treat a bare "invalid_grant" as terminal here.
-    try {
-      const parsed = JSON.parse(text);
-      if (parsed?.error === "invalid_grant") {
-        throw new RefreshTokenExhaustedError("invalidated", resp.status, text);
-      }
-    } catch (e) {
-      if (e instanceof RefreshTokenExhaustedError) throw e;
-    }
     throw new Error(`Gemini token refresh failed (${resp.status}): ${text}`);
   }
 
