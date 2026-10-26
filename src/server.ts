@@ -144,6 +144,11 @@ export function createServer(
       next();
       return;
     }
+    // count_tokens is a cheap local call that clients poll in bursts (context meter): not counted.
+    if (req.path === "/messages/count_tokens") {
+      next();
+      return;
+    }
     const ip = req.ip || req.socket.remoteAddress || "unknown";
     if (!rateLimit(ip)) {
       res.status(429).json({ error: { message: "Too many requests" } });
