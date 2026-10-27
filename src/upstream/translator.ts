@@ -160,6 +160,26 @@ function convertContentParts(parts: any[]): any[] {
   });
 }
 
+// A tool message may carry an OpenAI content array (text + image_url parts).
+// Anthropic tool_result accepts text and image blocks, so convert instead of
+// stringifying (which dropped the images). Strings pass through; nothing
+// convertible falls back to the old JSON string.
+function convertToolResultContent(content: any): any {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return JSON.stringify(content);
+  const blocks: any[] = [];
+  for (const part of content) {
+    if (part?.type === "text" && part.text) {
+      blocks.push({ type: "text", text: part.text });
+    } else if (part?.type === "image_url" && part.image_url?.url) {
+      blocks.push(convertImage(part.image_url.url));
+    } else if (part?.type === "image" && part.source) {
+      blocks.push({ type: "image", source: part.source });
+    }
+  }
+  return blocks.length > 0 ? blocks : JSON.stringify(content);
+}
+
 // ── OpenAI tools → Anthropic tools ──
 
 function convertChatTools(tools: any[]): any[] {
@@ -237,10 +257,7 @@ export function openaiToAnthropic(body: any): any {
           {
             type: "tool_result",
             tool_use_id: msg.tool_call_id,
-            content:
-              typeof msg.content === "string"
-                ? msg.content
-                : JSON.stringify(msg.content),
+            content: convertToolResultContent(msg.content),
           },
         ],
       });
