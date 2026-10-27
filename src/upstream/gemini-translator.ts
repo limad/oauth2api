@@ -211,6 +211,17 @@ function anthropicContentToParts(
     } else if (block?.type === "image") {
       const part = convertImageBlock(block);
       if (part) parts.push(part);
+    } else if (block?.type === "document") {
+      // Base64 documents (PDF...) travel as inlineData like images; url and
+      // text-source documents have no Gemini equivalent and are dropped.
+      if (block.source?.type === "base64" && block.source.data) {
+        parts.push({
+          inlineData: {
+            mimeType: block.source.media_type || "application/pdf",
+            data: block.source.data,
+          },
+        });
+      }
     } else if (block?.type === "tool_use" && role === "assistant") {
       const signature = block.signature || PLACEHOLDER_THOUGHT_SIGNATURE;
       parts.push({
