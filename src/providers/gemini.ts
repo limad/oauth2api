@@ -34,6 +34,7 @@ export function buildGeminiProvider(authDir: string): Provider {
       const token = await refreshGeminiTokensWithRetry(rt);
       return { ...token, provider: "gemini" };
     },
+    refreshPolicy: { kind: "expires-lead", leadMs: 5 * 60 * 1000 },
   });
   const catalog = new GeminiCatalog(manager, authDir);
   // Accounts are loaded right after construction; first live fetch shortly after.

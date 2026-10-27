@@ -15,7 +15,7 @@ function ownedBy(apiProvider: string | undefined): string {
   return apiProvider === "API_PROVIDER_GOOGLE_GEMINI" ? "google" : "antigravity";
 }
 
-/** Keeps user-selectable chat models; drops internal/tab/completion backends. */
+/** Keeps user-selectable chat models; drops internal/tab/completion backends and disabled models. */
 export function parseAvailableModels(
   data: any,
 ): ModelInfo[] {
@@ -24,6 +24,7 @@ export function parseAvailableModels(
   if (!models || typeof models !== "object") return out;
   for (const [id, m] of Object.entries<any>(models)) {
     if (!m?.displayName || m.apiProvider === "API_PROVIDER_INTERNAL") continue;
+    if (m.disabled || /-disabled$/.test(id)) continue;
     if (/^(tab_|chat_)/.test(id) || /-tiered$/.test(id)) continue;
     if (/image/.test(id)) continue; // image generation: not a chat model
     const mime = m.supportedMimeTypes || {};
@@ -121,10 +122,25 @@ export class GeminiCatalog {
   }
 
   async refresh(): Promise<void> {
-    const result = this.manager.getNextAccount();
-    if (!result.account) return;
-    const fresh = await fetchForAccount(result.account.token);
-    if (!fresh) return;
+    const accounts = this.manager.getAllAccounts();
+    if (accounts.length === 0) return;
+
+    // Merge model catalogues from all connected accounts so that models
+    // specific to higher entitlement tiers (e.g. Gemini 4 Argon, Claude 5.5)
+    // are available even if other accounts don't have access to them.
+    const merged = new Map<string, ModelInfo>();
+    for (const acct of accounts) {
+      const list = await fetchForAccount(acct.token);
+      if (!list) continue;
+      for (const m of list) {
+        if (!merged.has(m.id)) {
+          merged.set(m.id, m);
+        }
+      }
+    }
+    if (merged.size === 0) return;
+
+    const fresh = Array.from(merged.values());
     this.set(fresh, Date.now());
     try {
       fs.writeFileSync(

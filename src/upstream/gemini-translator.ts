@@ -37,6 +37,8 @@ const GEMINI_MODEL_ALIASES: Record<string, string> = {
   "gemini-2.0-flash": "gemini-3-flash",
   "gemini-2.0-flash-online": "gemini-3-flash",
   "gemini-3-flash-preview": "gemini-3-flash",
+  "gemini-4-argon": "gemini-4-argon-medium",
+  "gemini-4-argon-preview": "gemini-4-argon-medium",
   "gemini-3-pro-image-preview": "gemini-3-pro-image",
   "gemini-3-flash-image": "gemini-3.1-flash-image",
   "gemini-3.1-flash-image-preview": "gemini-3.1-flash-image",
@@ -123,6 +125,10 @@ const UNSUPPORTED_SCHEMA_KEYS = new Set([
   "$schema",
   "unevaluatedProperties",
   "const",
+  "propertyNames",
+  "patternProperties",
+  "exclusiveMinimum",
+  "exclusiveMaximum",
 ]);
 
 function sanitizeSchema(schema: any): any {
@@ -131,9 +137,50 @@ function sanitizeSchema(schema: any): any {
   const out: any = {};
   for (const [key, value] of Object.entries(schema)) {
     if (UNSUPPORTED_SCHEMA_KEYS.has(key)) continue;
+    // `properties` maps property names to schemas: the names themselves are
+    // free text (a property may be called "const"), only the values are schemas.
+    if (key === "properties" && value && typeof value === "object" && !Array.isArray(value)) {
+      out.properties = Object.fromEntries(
+        Object.entries(value).map(([name, sub]) => [name, sanitizeSchema(sub)]),
+      );
+      continue;
+    }
     out[key] = sanitizeSchema(value);
   }
+  if (Array.isArray(out.type)) normalizeTypeArray(out);
   return out;
+}
+
+// Gemini's `type` is a single enum, not a list: `"type": ["string", "null"]`
+// gets a 400 "Proto field is not repeating, cannot start list". "null" becomes
+// `nullable: true`; several remaining types become an `anyOf`, with the
+// array/object keywords moved into the branch they belong to.
+function normalizeTypeArray(out: any): void {
+  const all: string[] = out.type;
+  const types = [...new Set(all.filter((t) => t !== "null"))];
+  if (types.length < all.length) out.nullable = true;
+  if (types.length === 0) {
+    delete out.type;
+    return;
+  }
+  if (types.length === 1) {
+    out.type = types[0];
+    return;
+  }
+  delete out.type;
+  const branches = types.map((type) => {
+    const branch: any = { type };
+    if (type === "array" && out.items !== undefined) branch.items = out.items;
+    if (type === "object") {
+      if (out.properties !== undefined) branch.properties = out.properties;
+      if (out.required !== undefined) branch.required = out.required;
+    }
+    return branch;
+  });
+  delete out.items;
+  delete out.properties;
+  delete out.required;
+  out.anyOf = out.anyOf ? [...out.anyOf, ...branches] : branches;
 }
 
 // ── Anthropic content block → Gemini part ──

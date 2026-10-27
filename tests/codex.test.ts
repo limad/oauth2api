@@ -82,7 +82,10 @@ test("providerForModel routes by model name", () => {
     assert.equal(registry.forModel("mythos").id, "anthropic");
     assert.equal(registry.forModel("opus").id, "anthropic");
     assert.equal(registry.forModel("claude-opus-4-7").id, "anthropic");
-    // Codex — gpt-5 family + o-series + codex- prefix
+    // Codex — gpt-5/gpt-6 family + gpt-reserve + o-series + codex- prefix
+    assert.equal(registry.forModel("gpt-6").id, "codex");
+    assert.equal(registry.forModel("gpt-6-luna").id, "codex");
+    assert.equal(registry.forModel("gpt-reserve").id, "codex");
     assert.equal(registry.forModel("gpt-5").id, "codex");
     assert.equal(registry.forModel("gpt-5-codex").id, "codex");
     assert.equal(registry.forModel("gpt-5.5").id, "codex");
@@ -408,6 +411,20 @@ test("detectExhaustedReason recognises documented codes", () => {
     detectExhaustedReason(
       JSON.stringify({ error: { code: "invalid_refresh_token" } }),
     ),
+    "invalidated",
+  );
+  // Standard OAuth 2.0 bare-string form (Anthropic, Google): terminal, never retryable.
+  assert.equal(
+    detectExhaustedReason(
+      JSON.stringify({
+        error: "invalid_grant",
+        error_description: "Refresh token expired",
+      }),
+    ),
+    "expired",
+  );
+  assert.equal(
+    detectExhaustedReason(JSON.stringify({ error: "invalid_grant" })),
     "invalidated",
   );
   // Non-terminal codes / parse failures return null.

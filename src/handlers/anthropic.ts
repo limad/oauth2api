@@ -184,6 +184,9 @@ export function createMessagesHandler(
       const model = resolveModel(body.model || "claude-sonnet-4-6");
       const provider = registry.forModel(model);
       tagStatsModel(resp, model, provider.id);
+      // Send the resolved id upstream: aliases ("haiku", "opus", "at/<id>") are
+      // only known to us, so passing body.model through raw gives a 404 upstream.
+      if (body.model) body.model = model;
 
       // Codex's upstream is the OpenAI Responses API; route /v1/messages
       // through a dedicated translator path that converts Anthropic
@@ -278,13 +281,10 @@ export function createCountTokensHandler(
       tagStatsModel(resp, model, provider.id);
 
       if (!provider.callCountTokens) {
-        resp.status(501).json({
-          error: {
-            message: `count_tokens is not supported for the ${provider.id} provider.`,
-            type: "unsupported_endpoint_for_provider",
-            provider: provider.id,
-          },
-        });
+        // No upstream counter (codex, cursor, ...): answer with a local estimate (~4 chars/token)
+        // so clients that poll count_tokens (Claude Code/Desktop context meter) keep working.
+        const chars = JSON.stringify([body?.system ?? "", body?.messages ?? [], body?.tools ?? []]).length;
+        resp.json({ input_tokens: Math.max(1, Math.ceil(chars / 4)) });
         return;
       }
 

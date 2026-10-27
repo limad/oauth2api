@@ -29,8 +29,8 @@ export class RefreshTokenExhaustedError extends Error {
 
 /**
  * Inspect an OAuth error body to detect a permanent-failure signal.
- * Recognises the three codes the OpenAI auth backend sends (also used for
- * Anthropic — both providers follow the OAuth 2.0 error-code convention).
+ * Recognises the codes the OpenAI auth backend sends, plus the standard OAuth 2.0
+ * `invalid_grant` returned by Anthropic and Google.
  */
 export function detectExhaustedReason(
   body: string,
@@ -58,5 +58,13 @@ export function detectExhaustedReason(
   // Please try signing in again."). Both mean the token is dead, not retryable.
   if (normalized === "refresh_token_invalidated") return "invalidated";
   if (normalized === "invalid_refresh_token") return "invalidated";
+  // RFC 6749 §5.2 "invalid_grant": the refresh token is expired, revoked or
+  // otherwise unusable — retrying can never succeed. Anthropic and Google
+  // answer with the bare string form {"error":"invalid_grant",
+  // "error_description":"Refresh token expired"}.
+  if (normalized === "invalid_grant") {
+    const description = String(parsed?.error_description ?? "").toLowerCase();
+    return description.includes("expired") ? "expired" : "invalidated";
+  }
   return null;
 }

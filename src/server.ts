@@ -1,3 +1,4 @@
+import { modelAliasMiddleware } from "./utils/model-echo";
 import express from "express";
 import net from "net";
 import { Config, isDebugLevel } from "./config";
@@ -140,6 +141,11 @@ export function createServer(
     // Calls made by the Ollama facade to our own /v1 are already rate-limited
     // once on /api with the real client IP.
     if (req.header(INTERNAL_HEADER) === INTERNAL_SECRET) {
+      next();
+      return;
+    }
+    // count_tokens is a cheap local call that clients poll in bursts (context meter): not counted.
+    if (req.path === "/messages/count_tokens") {
       next();
       return;
     }
@@ -340,6 +346,9 @@ export function createServer(
 
   app.use(["/v1", "/codex", "/backend-api/codex"], requireApiKey);
   app.use(["/v1", "/codex", "/backend-api/codex"], statsFinishMiddleware);
+  // Rewrite an aliased `model` to its real id before any handler sees it; responses carry the alias back.
+  const modelAliases = config["model-aliases"] ?? {};
+  app.use(["/v1", "/codex", "/backend-api/codex"], modelAliasMiddleware(modelAliases));
   app.get("/v1/models", async (_req, res) => {
     const created = Math.floor(Date.now() / 1000);
     const providers = registry.withAccounts();
@@ -351,6 +360,12 @@ export function createServer(
         created,
       })),
     );
+    // Aliases are listed whenever their target is (alias list follows `expose-models`).
+    const byId = new Map(data.map((m) => [m.id, m]));
+    for (const [alias, target] of Object.entries(modelAliases)) {
+      const t = byId.get(target);
+      if (t && !byId.has(alias)) data.push({ ...t, id: alias });
+    }
     res.json({ object: "list", data });
   });
 

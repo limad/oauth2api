@@ -573,13 +573,18 @@ export class AccountManager {
 
   private logStats(): void {
     if (this.accounts.size === 0) return;
+    let totalReqs = 0;
+    for (const acct of this.accounts.values()) {
+      totalReqs += acct.totalRequests;
+    }
+    if (totalReqs === 0) return;
     console.log(
-      `\n===== [${this.provider}] account stats (${new Date().toISOString()}) =====`,
+      `[DEBUG] ===== [${this.provider}] account stats (${new Date().toISOString()}) =====`,
     );
     for (const acct of this.accounts.values()) {
       const available = acct.cooldownUntil <= Date.now();
       console.log(
-        `  ${acct.token.email}: ` +
+        `[DEBUG]   ${acct.token.email}: ` +
           `available=${available}, ` +
           `requests=${acct.totalRequests}, ` +
           `successes=${acct.totalSuccesses}, ` +
@@ -592,11 +597,23 @@ export class AccountManager {
           `total_tokens=${acct.totalInputTokens + acct.totalOutputTokens + acct.totalCacheCreationInputTokens + acct.totalCacheReadInputTokens}`,
       );
     }
-    console.log(`====================================================\n`);
+    console.log(`[DEBUG] ====================================================`);
   }
 
   get accountCount(): number {
     return this.accounts.size;
+  }
+
+  /** Returns all currently loaded accounts (with device IDs and credentials). */
+  getAllAccounts(): AvailableAccount[] {
+    const out: AvailableAccount[] = [];
+    for (const email of this.accountOrder) {
+      const acct = this.accounts.get(email);
+      if (acct) {
+        out.push(buildAvailableAccount(this.authDir, email, acct.token, this.provider));
+      }
+    }
+    return out;
   }
 
   private shouldRefresh(acct: AccountState, now: number): boolean {
@@ -636,7 +653,7 @@ export class AccountManager {
   private async performRefresh(acct: AccountState): Promise<boolean> {
     try {
       console.log(
-        `[${this.provider}] refreshing token for ${acct.token.email}…`,
+        `[DEBUG] [${this.provider}] refreshing token for ${acct.token.email}…`,
       );
       const refreshed = await this.refreshFn(acct.token.refreshToken);
       const refreshAt = new Date().toISOString();
@@ -663,7 +680,7 @@ export class AccountManager {
       acct.lastSuccessAt = refreshAt;
       acct.lastRefreshAt = refreshAt;
       console.log(
-        `[${this.provider}] token refreshed for ${newToken.email}, expires ${newToken.expiresAt}`,
+        `[DEBUG] [${this.provider}] token refreshed for ${newToken.email}, expires ${newToken.expiresAt}`,
       );
       return true;
     } catch (err: any) {

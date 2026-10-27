@@ -62,6 +62,9 @@ export interface Config {
   "ollama-facade"?: boolean;
   // Patterns (`*` wildcard, leading `!` = exclude) of models listed on /v1/models. Empty = all.
   "expose-models": string[];
+  // Extra model ids (alias -> real id): listed on /v1/models next to their target and rewritten on requests.
+  // Lets clients that only accept `claude-*` ids use other models (e.g. `claude-gpt-5.5: gpt-5.5`).
+  "model-aliases": Record<string, string>;
   "body-limit": string;
   cloaking: CloakingConfig;
   timeouts: TimeoutConfig;
@@ -82,6 +85,7 @@ const DEFAULT_RAW: RawConfig = {
   "api-keys": [],
   "allowed-ips": [],
   "expose-models": [],
+  "model-aliases": {},
   "body-limit": "200mb",
   cloaking: {
     "cli-version": "2.1.88",
@@ -149,6 +153,14 @@ export function loadConfig(configPath?: string): Config {
   raw["expose-models"] = Array.isArray(raw["expose-models"])
     ? raw["expose-models"].map((e) => String(e).trim()).filter(Boolean)
     : [];
+  raw["model-aliases"] =
+    raw["model-aliases"] && typeof raw["model-aliases"] === "object" && !Array.isArray(raw["model-aliases"])
+      ? Object.fromEntries(
+          Object.entries(raw["model-aliases"] as Record<string, unknown>)
+            .map(([k, v]) => [String(k).trim(), String(v).trim()])
+            .filter(([k, v]) => k && v),
+        )
+      : {};
   raw["allowed-ips"] = Array.isArray(raw["allowed-ips"])
     ? raw["allowed-ips"].map((e) => String(e).trim()).filter(Boolean)
     : [];

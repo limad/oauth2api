@@ -101,6 +101,30 @@ export interface CloakingOptions {
   config: Config;
 }
 
+/**
+ * Anthropic refuses a ttl="1h" cache_control placed after a 5m one (processing order:
+ * tools, system, messages). The injected CLI prefix block must therefore not be 5m
+ * when the client's own blocks use 1h (Claude Desktop / Claude Code do).
+ */
+function injectedPrefixCacheControl(body: any): { type: "ephemeral"; ttl?: "1h" } {
+  const hasTtl = (blocks: any, ttl: string): boolean =>
+    Array.isArray(blocks) &&
+    blocks.some(
+      (b) =>
+        b?.cache_control?.ttl === ttl ||
+        (Array.isArray(b?.content) && hasTtl(b.content, ttl)),
+    );
+  const hasShortCache = (blocks: any): boolean =>
+    Array.isArray(blocks) &&
+    blocks.some((b) => b?.cache_control && b.cache_control.ttl !== "1h");
+  const later = [body.system, ...(body.messages ?? []).map((m: any) => m?.content)];
+  const needs1h = later.some((blocks) => hasTtl(blocks, "1h"));
+  if (needs1h && !hasShortCache(body.tools)) {
+    return { type: "ephemeral", ttl: "1h" };
+  }
+  return { type: "ephemeral" };
+}
+
 export function applyCloaking(options: CloakingOptions): any {
   const { request, account, config } = options;
   const body = structuredClone(options.body ?? request.body);
@@ -139,7 +163,7 @@ export function applyCloaking(options: CloakingOptions): any {
       : {
           type: "text",
           text: "You are Claude Code, Anthropic's official CLI for Claude.",
-          cache_control: { type: "ephemeral" },
+          cache_control: injectedPrefixCacheControl(body),
         };
 
   // Reassemble: billing header (pos 0), prefix (pos 1), then the rest

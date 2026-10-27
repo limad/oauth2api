@@ -181,7 +181,7 @@ export function chatToResponsesRequest(body: any): any {
   if (body.top_p !== undefined) out.top_p = body.top_p;
   const maxTokens = body.max_completion_tokens ?? body.max_tokens;
   if (maxTokens !== undefined) out.max_output_tokens = maxTokens;
-  if (body.user) out.user = body.user;
+  // `user` is not forwarded: the ChatGPT Codex backend rejects it ("Unsupported parameter: user").
 
   if (body.reasoning_effort) {
     out.reasoning = { effort: body.reasoning_effort };
@@ -310,7 +310,7 @@ export function anthropicToResponsesRequest(body: any): any {
   if (body.max_tokens !== undefined) out.max_output_tokens = body.max_tokens;
   if (body.temperature !== undefined) out.temperature = body.temperature;
   if (body.top_p !== undefined) out.top_p = body.top_p;
-  if (body.metadata?.user_id) out.user = body.metadata.user_id;
+  // metadata.user_id is not forwarded as `user` (rejected by the Codex backend).
 
   // Anthropic `system` can be a string or [{type:"text", text}] array.
   if (body.system) {
