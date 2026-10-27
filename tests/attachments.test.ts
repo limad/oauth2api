@@ -46,3 +46,25 @@ test("string tool result is unchanged", () => {
 test("unconvertible array falls back to JSON string", () => {
   assert.equal(toolResult([{ type: "weird" }]), JSON.stringify([{ type: "weird" }]));
 });
+
+import { anthropicToGeminiContents } from "../src/upstream/gemini-translator";
+
+test("gemini: base64 document becomes inlineData", () => {
+  const r = anthropicToGeminiContents({
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "read" },
+          {
+            type: "document",
+            source: { type: "base64", media_type: "application/pdf", data: "JVBERi0=" },
+          },
+        ],
+      },
+    ],
+  });
+  assert.deepEqual(r.contents[0].parts[1], {
+    inlineData: { mimeType: "application/pdf", data: "JVBERi0=" },
+  });
+});
