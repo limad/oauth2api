@@ -7,6 +7,7 @@ import { ANTIGRAVITY_PREFIX } from "./translator";
 import { readSseEvents } from "./streaming";
 import {
   anthropicToGeminiContents,
+  UnsupportedContentError,
   geminiResponseToAnthropic,
   geminiChunkToAnthropicSSE,
   finishGeminiStream,
@@ -271,8 +272,23 @@ export async function callGeminiMessages(
     );
   }
 
+  let translated: ReturnType<typeof anthropicToGeminiContents>;
+  try {
+    translated = anthropicToGeminiContents(body);
+  } catch (err) {
+    if (err instanceof UnsupportedContentError) {
+      return new Response(
+        JSON.stringify({
+          type: "error",
+          error: { type: "invalid_request_error", message: err.message },
+        }),
+        { status: 400, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    throw err;
+  }
   const { contents, systemInstruction, tools, toolConfig, generationConfig } =
-    anthropicToGeminiContents(body);
+    translated;
 
   // Envelope as sent by the real Antigravity CLI 1.2.17 (mitmproxy capture,
   // requestType "agent"): requestId is "agent/<uuid>", userAgent is the fixed

@@ -68,3 +68,45 @@ test("gemini: base64 document becomes inlineData", () => {
     inlineData: { mimeType: "application/pdf", data: "JVBERi0=" },
   });
 });
+
+import { UnsupportedContentError } from "../src/upstream/gemini-translator";
+
+test("gemini: url-only image turn is refused", () => {
+  assert.throws(
+    () =>
+      anthropicToGeminiContents({
+        messages: [
+          {
+            role: "user",
+            content: [{ type: "image", source: { type: "url", url: "https://x/y.png" } }],
+          },
+        ],
+      }),
+    (e: any) => e instanceof UnsupportedContentError && /image \(url\)/.test(e.message),
+  );
+});
+
+test("gemini: text beside an unsupported part still travels", () => {
+  const r = anthropicToGeminiContents({
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "hi" },
+          { type: "image", source: { type: "url", url: "https://x/y.png" } },
+        ],
+      },
+    ],
+  });
+  assert.deepEqual(r.contents[0].parts, [{ text: "hi" }]);
+});
+
+test("gemini: thinking-only assistant turn is skipped, not refused", () => {
+  const r = anthropicToGeminiContents({
+    messages: [
+      { role: "user", content: "q" },
+      { role: "assistant", content: [{ type: "thinking", thinking: "..." }] },
+    ],
+  });
+  assert.equal(r.contents.length, 1);
+});
