@@ -185,6 +185,19 @@ function normalizeTypeArray(out: any): void {
 
 // ── Anthropic content block → Gemini part ──
 
+/**
+ * Raised when a turn carries only content Gemini cannot receive (url images,
+ * non-base64 documents, unknown block types). Forwarding it would send an
+ * empty turn and the model would answer as if nothing was attached, so the
+ * caller turns this into a 400 instead. Text beside the part still travels.
+ */
+export class UnsupportedContentError extends Error {
+  constructor(public readonly partType: string) {
+    super(`unsupported content part: ${partType}`);
+    this.name = "UnsupportedContentError";
+  }
+}
+
 function convertImageBlock(block: any): any | null {
   if (block.source?.type === "base64" && block.source.data) {
     return {
@@ -201,6 +214,7 @@ function anthropicContentToParts(
   content: any,
   role: string,
   toolIdToName: Map<string, string>,
+  dropped: string[] = [],
 ): any[] {
   if (typeof content === "string") return [{ text: content }];
   if (!Array.isArray(content)) return [];
@@ -211,6 +225,7 @@ function anthropicContentToParts(
     } else if (block?.type === "image") {
       const part = convertImageBlock(block);
       if (part) parts.push(part);
+      else dropped.push(block.source?.type === "url" ? "image (url)" : "image");
     } else if (block?.type === "document") {
       // Base64 documents (PDF...) travel as inlineData like images; url and
       // text-source documents have no Gemini equivalent and are dropped.
@@ -221,6 +236,8 @@ function anthropicContentToParts(
             data: block.source.data,
           },
         });
+      } else {
+        dropped.push(`document (${block.source?.type || "unknown"} source)`);
       }
     } else if (block?.type === "tool_use" && role === "assistant") {
       const signature = block.signature || PLACEHOLDER_THOUGHT_SIGNATURE;
@@ -250,6 +267,13 @@ function anthropicContentToParts(
       // ClaudeRequestMapper.ts (`toolIdToName.get(block.tool_use_id)`).
       const name = toolIdToName.get(block.tool_use_id) || block.tool_use_id;
       parts.push({ functionResponse: { name, response } });
+    } else if (
+      block?.type &&
+      block.type !== "thinking" &&
+      block.type !== "redacted_thinking" &&
+      block.type !== "tool_use"
+    ) {
+      dropped.push(String(block.type));
     }
     // "thinking" blocks from prior assistant turns are intentionally
     // dropped — Gemini regenerates its own thought parts and does not
@@ -285,8 +309,15 @@ export function anthropicToGeminiContents(body: any): {
   const contents: any[] = [];
   for (const msg of messages) {
     const role = msg.role === "assistant" ? "model" : "user";
-    const parts = anthropicContentToParts(msg.content, msg.role, toolIdToName);
+    const dropped: string[] = [];
+    const parts = anthropicContentToParts(
+      msg.content,
+      msg.role,
+      toolIdToName,
+      dropped,
+    );
     if (parts.length) contents.push({ role, parts });
+    else if (dropped.length) throw new UnsupportedContentError(dropped[0]);
   }
 
   let systemInstruction: any;
