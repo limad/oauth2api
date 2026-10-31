@@ -5,15 +5,33 @@ function compactUuid(): string {
   return uuidv4().replace(/-/g, "");
 }
 
+// Anthropic reports uncached input_tokens plus separate cache_read / cache_creation
+// counters; OpenAI's prompt_tokens / input_tokens is the whole prompt, cached part
+// included (cached_tokens is a subset of it). Fold the cache counters back in so
+// clients see the real prompt size instead of only its uncached tail.
+function anthropicPromptTokens(
+  inputTokens: number,
+  cacheReadTokens: number,
+  cacheCreationTokens: number,
+): number {
+  return inputTokens + cacheReadTokens + cacheCreationTokens;
+}
+
 function formatChatUsage(
   inputTokens: number,
   outputTokens: number,
   cachedTokens: number,
+  cacheCreationTokens = 0,
 ): any {
+  const promptTokens = anthropicPromptTokens(
+    inputTokens,
+    cachedTokens,
+    cacheCreationTokens,
+  );
   return {
-    prompt_tokens: inputTokens,
+    prompt_tokens: promptTokens,
     completion_tokens: outputTokens,
-    total_tokens: inputTokens + outputTokens,
+    total_tokens: promptTokens + outputTokens,
     prompt_tokens_details: { cached_tokens: cachedTokens },
     completion_tokens_details: { reasoning_tokens: 0 },
   };
@@ -23,11 +41,17 @@ function formatResponsesUsage(
   inputTokens: number,
   outputTokens: number,
   cachedTokens: number,
+  cacheCreationTokens = 0,
 ): any {
+  const promptTokens = anthropicPromptTokens(
+    inputTokens,
+    cachedTokens,
+    cacheCreationTokens,
+  );
   return {
-    input_tokens: inputTokens,
+    input_tokens: promptTokens,
     output_tokens: outputTokens,
-    total_tokens: inputTokens + outputTokens,
+    total_tokens: promptTokens + outputTokens,
     input_tokens_details: { cached_tokens: cachedTokens },
     output_tokens_details: { reasoning_tokens: 0 },
   };
@@ -368,6 +392,7 @@ export function anthropicToOpenai(anthropicResp: any, model: string): any {
       inputTokens,
       outputTokens,
       anthropicResp.usage?.cache_read_input_tokens || 0,
+      anthropicResp.usage?.cache_creation_input_tokens || 0,
     ),
   };
 }
@@ -501,6 +526,7 @@ const chatSSEHandlers: Record<string, ChatSSEHandler> = {
             usage.inputTokens,
             usage.outputTokens,
             usage.cacheReadInputTokens,
+            usage.cacheCreationInputTokens,
           ),
         })}\n\n`,
       );
@@ -782,6 +808,7 @@ export function anthropicToResponses(anthropicResp: any, model: string): any {
       inputTokens,
       outputTokens,
       anthropicResp.usage?.cache_read_input_tokens || 0,
+      anthropicResp.usage?.cache_creation_input_tokens || 0,
     ),
   };
 }
@@ -1115,6 +1142,7 @@ const responsesSSEHandlers: Record<string, ResponsesSSEHandler> = {
             usage.inputTokens,
             usage.outputTokens,
             usage.cacheReadInputTokens,
+            usage.cacheCreationInputTokens,
           ),
         },
       }),

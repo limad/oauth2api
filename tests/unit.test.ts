@@ -703,10 +703,14 @@ test("anthropicToOpenai includes usage details", () => {
         input_tokens: 100,
         output_tokens: 50,
         cache_read_input_tokens: 30,
+        cache_creation_input_tokens: 7,
       },
     },
     "sonnet",
   );
+  // OpenAI prompt_tokens is the whole prompt: uncached + cache read + cache write.
+  assert.equal(result.usage.prompt_tokens, 137);
+  assert.equal(result.usage.total_tokens, 187);
   assert.equal(result.usage.prompt_tokens_details.cached_tokens, 30);
   assert.equal(result.usage.completion_tokens_details.reasoning_tokens, 0);
 });
@@ -760,14 +764,14 @@ test("anthropicSSEToChat handles message_stop with usage", () => {
   const usage: UsageData = {
     inputTokens: 10,
     outputTokens: 5,
-    cacheCreationInputTokens: 0,
+    cacheCreationInputTokens: 3,
     cacheReadInputTokens: 2,
   };
   const chunks = anthropicSSEToChat("message_stop", {}, state, usage);
   assert.equal(chunks.length, 2); // usage chunk + [DONE]
   const usageChunk = parseChatSSE(chunks[0]);
   assert.deepEqual(usageChunk.choices, []);
-  assert.equal(usageChunk.usage.prompt_tokens, 10);
+  assert.equal(usageChunk.usage.prompt_tokens, 15);
   assert.equal(usageChunk.usage.completion_tokens, 5);
   assert.equal(usageChunk.usage.prompt_tokens_details.cached_tokens, 2);
   assert.equal(chunks[1], "data: [DONE]\n\n");
@@ -910,10 +914,13 @@ test("anthropicToResponses includes usage details", () => {
         input_tokens: 100,
         output_tokens: 50,
         cache_read_input_tokens: 20,
+        cache_creation_input_tokens: 5,
       },
     },
     "sonnet",
   );
+  assert.equal(result.usage.input_tokens, 125);
+  assert.equal(result.usage.total_tokens, 175);
   assert.equal(result.usage.input_tokens_details.cached_tokens, 20);
   assert.equal(result.usage.output_tokens_details.reasoning_tokens, 0);
 });
@@ -1002,7 +1009,9 @@ test("anthropicSSEToResponses handles message_stop with usage", () => {
   );
   assert.ok(events.some((e) => e.includes("response.completed")));
   assert.ok(events.some((e) => e.includes("response.done")));
-  assert.ok(events.some((e) => e.includes('"input_tokens":100')));
+  // Responses input_tokens covers the whole prompt: 100 uncached + 10 cache read.
+  assert.ok(events.some((e) => e.includes('"input_tokens":110')));
+  assert.ok(events.some((e) => e.includes('"cached_tokens":10')));
 });
 
 test("anthropicSSEToResponses returns empty for unknown events", () => {
