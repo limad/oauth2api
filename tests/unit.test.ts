@@ -448,6 +448,30 @@ test("openaiToAnthropic translates basic request", () => {
   assert.deepEqual(result.messages, [{ role: "user", content: "hello" }]);
 });
 
+test("openaiToAnthropic keeps cache_control on system and tool-result text parts", () => {
+  const cc = { type: "ephemeral" };
+  const result = openaiToAnthropic({
+    model: "sonnet",
+    messages: [
+      { role: "system", content: [{ type: "text", text: "rules", cache_control: cc }, { type: "text", text: "more" }] },
+      { role: "user", content: "hi" },
+      { role: "assistant", content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "f", arguments: "{}" } }] },
+      { role: "tool", tool_call_id: "c1", content: [{ type: "text", text: "out", cache_control: cc }] },
+    ],
+  });
+  assert.deepEqual(result.system, [
+    { type: "text", text: "rules", cache_control: cc },
+    { type: "text", text: "more" },
+  ]);
+  assert.deepEqual(result.messages[2].content[0].content, [{ type: "text", text: "out", cache_control: cc }]);
+  // Without cache_control the system parts are still joined into one block.
+  const plain = openaiToAnthropic({
+    model: "sonnet",
+    messages: [{ role: "system", content: [{ type: "text", text: "a" }, { type: "text", text: "b" }] }, { role: "user", content: "hi" }],
+  });
+  assert.deepEqual(plain.system, [{ type: "text", text: "a\nb" }]);
+});
+
 test("openaiToAnthropic uses max_completion_tokens over max_tokens", () => {
   const result = openaiToAnthropic({
     model: "sonnet",
@@ -703,10 +727,14 @@ test("anthropicToOpenai includes usage details", () => {
         input_tokens: 100,
         output_tokens: 50,
         cache_read_input_tokens: 30,
+        cache_creation_input_tokens: 7,
       },
     },
     "sonnet",
   );
+  // OpenAI prompt_tokens is the whole prompt: uncached + cache read + cache write.
+  assert.equal(result.usage.prompt_tokens, 137);
+  assert.equal(result.usage.total_tokens, 187);
   assert.equal(result.usage.prompt_tokens_details.cached_tokens, 30);
   assert.equal(result.usage.completion_tokens_details.reasoning_tokens, 0);
 });
@@ -760,14 +788,14 @@ test("anthropicSSEToChat handles message_stop with usage", () => {
   const usage: UsageData = {
     inputTokens: 10,
     outputTokens: 5,
-    cacheCreationInputTokens: 0,
+    cacheCreationInputTokens: 3,
     cacheReadInputTokens: 2,
   };
   const chunks = anthropicSSEToChat("message_stop", {}, state, usage);
   assert.equal(chunks.length, 2); // usage chunk + [DONE]
   const usageChunk = parseChatSSE(chunks[0]);
   assert.deepEqual(usageChunk.choices, []);
-  assert.equal(usageChunk.usage.prompt_tokens, 10);
+  assert.equal(usageChunk.usage.prompt_tokens, 15);
   assert.equal(usageChunk.usage.completion_tokens, 5);
   assert.equal(usageChunk.usage.prompt_tokens_details.cached_tokens, 2);
   assert.equal(chunks[1], "data: [DONE]\n\n");
@@ -910,10 +938,13 @@ test("anthropicToResponses includes usage details", () => {
         input_tokens: 100,
         output_tokens: 50,
         cache_read_input_tokens: 20,
+        cache_creation_input_tokens: 5,
       },
     },
     "sonnet",
   );
+  assert.equal(result.usage.input_tokens, 125);
+  assert.equal(result.usage.total_tokens, 175);
   assert.equal(result.usage.input_tokens_details.cached_tokens, 20);
   assert.equal(result.usage.output_tokens_details.reasoning_tokens, 0);
 });
@@ -1002,7 +1033,9 @@ test("anthropicSSEToResponses handles message_stop with usage", () => {
   );
   assert.ok(events.some((e) => e.includes("response.completed")));
   assert.ok(events.some((e) => e.includes("response.done")));
-  assert.ok(events.some((e) => e.includes('"input_tokens":100')));
+  // Responses input_tokens covers the whole prompt: 100 uncached + 10 cache read.
+  assert.ok(events.some((e) => e.includes('"input_tokens":110')));
+  assert.ok(events.some((e) => e.includes('"cached_tokens":10')));
 });
 
 test("anthropicSSEToResponses returns empty for unknown events", () => {
@@ -1331,4 +1364,29 @@ test("applyCloaking: injected prefix stays 5m when no 1h block is present", () =
   });
   const prefix = out.system.find((b: any) => String(b.text).startsWith("You are Claude Code"));
   assert.deepEqual(prefix.cache_control, { type: "ephemeral" });
+});
+
+test("applyCloaking: no breakpoint on the injected prefix when the client already uses 4", () => {
+  const cfg: any = { cloaking: {} };
+  const acct: any = { deviceId: "d", accountUuid: "a" };
+  const req: any = { headers: { authorization: "Bearer k" }, body: {} };
+  const cc = { type: "ephemeral" };
+  const body = {
+    tools: [{ name: "t", input_schema: { type: "object" }, cache_control: cc }],
+    system: [{ type: "text", text: "client", cache_control: cc }],
+    messages: [
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "x", content: [{ type: "text", text: "r", cache_control: cc }] }] },
+      { role: "assistant", content: "ok" },
+      { role: "user", content: [{ type: "text", text: "hi", cache_control: cc }] },
+    ],
+  };
+  const out = applyCloaking({ request: req, account: acct, config: cfg, body });
+  const prefix = out.system.find((b: any) => String(b.text).startsWith("You are Claude Code"));
+  assert.equal(prefix.cache_control, undefined);
+  const three = applyCloaking({
+    request: req, account: acct, config: cfg,
+    body: { ...body, tools: [{ name: "t", input_schema: { type: "object" } }] },
+  });
+  const prefix3 = three.system.find((b: any) => String(b.text).startsWith("You are Claude Code"));
+  assert.deepEqual(prefix3.cache_control, { type: "ephemeral" });
 });

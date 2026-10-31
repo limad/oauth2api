@@ -472,12 +472,46 @@ export function responsesToChatCompletion(resp: any, model: string): any {
         logprobs: null,
       },
     ],
-    usage: {
-      prompt_tokens: resp?.usage?.input_tokens || 0,
-      completion_tokens: resp?.usage?.output_tokens || 0,
-      total_tokens:
-        (resp?.usage?.input_tokens || 0) + (resp?.usage?.output_tokens || 0),
+    usage: responsesUsageToChat(resp?.usage),
+  };
+}
+
+/**
+ * Responses usage → Chat Completions usage. Both count the whole prompt in
+ * input/prompt tokens with the cached part as a subset, so the cache and
+ * reasoning details map one to one (they used to be dropped).
+ */
+export function responsesUsageToChat(u: any): any {
+  const prompt = u?.input_tokens || 0;
+  const completion = u?.output_tokens || 0;
+  return {
+    prompt_tokens: prompt,
+    completion_tokens: completion,
+    total_tokens: prompt + completion,
+    prompt_tokens_details: {
+      cached_tokens: u?.input_tokens_details?.cached_tokens || 0,
     },
+    completion_tokens_details: {
+      reasoning_tokens: u?.output_tokens_details?.reasoning_tokens || 0,
+    },
+  };
+}
+
+/**
+ * Responses usage → Anthropic Messages usage. Responses input_tokens includes
+ * the cached prefix; Anthropic input_tokens is the uncached part only, with
+ * cache reads reported apart. Codex has no cache-write counter.
+ */
+export function responsesUsageToAnthropic(u: any): {
+  input_tokens: number;
+  cache_creation_input_tokens: number;
+  cache_read_input_tokens: number;
+} {
+  const cached = u?.input_tokens_details?.cached_tokens || 0;
+  return {
+    input_tokens: Math.max(0, (u?.input_tokens || 0) - cached),
+    cache_creation_input_tokens: 0,
+    cache_read_input_tokens: cached,
   };
 }
 
@@ -528,12 +562,8 @@ export function responsesToAnthropicMessage(resp: any, model: string): any {
     stop_reason: stopReason,
     stop_sequence: null,
     usage: {
-      input_tokens: resp?.usage?.input_tokens || 0,
+      ...responsesUsageToAnthropic(resp?.usage),
       output_tokens: resp?.usage?.output_tokens || 0,
-      cache_creation_input_tokens:
-        resp?.usage?.input_tokens_details?.cached_tokens || 0,
-      cache_read_input_tokens:
-        resp?.usage?.input_tokens_details?.cached_tokens || 0,
     },
   };
 }
@@ -557,10 +587,16 @@ export interface ResponsesToChatState {
   itemIdToCallId: Map<string, string>;
   nextToolIndex: number;
   finishReason: string;
+  // stream_options.include_usage: emit the OpenAI usage chunk before [DONE].
+  includeUsage?: boolean;
 }
 
-export function makeResponsesToChatState(model: string): ResponsesToChatState {
+export function makeResponsesToChatState(
+  model: string,
+  includeUsage = false,
+): ResponsesToChatState {
   return {
+    includeUsage,
     id: `chatcmpl-${compactUuid().slice(0, 24)}`,
     created: Math.floor(Date.now() / 1000),
     fingerprint: `fp_${compactUuid().slice(0, 12)}`,
@@ -683,9 +719,23 @@ export function responsesSSEToChat(
       if (status === "incomplete" && state.finishReason === "stop") {
         state.finishReason = "length";
       }
+      const usage = data?.response?.usage;
       return [
         ...ensureRolePrimer(state),
         buildChatChunk(state, {}, state.finishReason),
+        ...(state.includeUsage && usage
+          ? [
+              `data: ${JSON.stringify({
+                id: state.id,
+                object: "chat.completion.chunk",
+                created: state.created,
+                model: state.model,
+                system_fingerprint: state.fingerprint,
+                choices: [],
+                usage: responsesUsageToChat(usage),
+              })}\n\n`,
+            ]
+          : []),
         "data: [DONE]\n\n",
       ];
     }
@@ -958,7 +1008,9 @@ export function responsesSSEToAnthropic(
     case "response.completed": {
       const r = data?.response;
       if (r?.usage) {
-        state.inputTokens = r.usage.input_tokens || 0;
+        const u = responsesUsageToAnthropic(r.usage);
+        state.inputTokens = u.input_tokens;
+        state.cacheReadTokens = u.cache_read_input_tokens;
         state.outputTokens = r.usage.output_tokens || 0;
       }
       if (r?.status === "incomplete" && state.stopReason === "end_turn") {
@@ -970,7 +1022,14 @@ export function responsesSSEToAnthropic(
         sseEvent("message_delta", {
           type: "message_delta",
           delta: { stop_reason: state.stopReason, stop_sequence: null },
-          usage: { output_tokens: state.outputTokens },
+          // message_start went out before usage was known: repeat the final
+          // cumulative counters here, as the Anthropic API does.
+          usage: {
+            input_tokens: state.inputTokens,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: state.cacheReadTokens,
+            output_tokens: state.outputTokens,
+          },
         }),
       );
       out.push(sseEvent("message_stop", { type: "message_stop" }));
