@@ -125,6 +125,28 @@ function injectedPrefixCacheControl(body: any): { type: "ephemeral"; ttl?: "1h" 
   return { type: "ephemeral" };
 }
 
+/** Anthropic accepts at most 4 cache_control breakpoints per request. */
+const MAX_CACHE_BREAKPOINTS = 4;
+
+function countCacheBreakpoints(body: any): number {
+  const count = (blocks: any): number =>
+    Array.isArray(blocks)
+      ? blocks.reduce(
+          (n: number, b: any) =>
+            n + (b?.cache_control ? 1 : 0) + count(b?.content),
+          0,
+        )
+      : 0;
+  return (
+    count(body.tools) +
+    count(body.system) +
+    (body.messages ?? []).reduce(
+      (n: number, m: any) => n + count(m?.content),
+      0,
+    )
+  );
+}
+
 export function applyCloaking(options: CloakingOptions): any {
   const { request, account, config } = options;
   const body = structuredClone(options.body ?? request.body);
@@ -157,13 +179,17 @@ export function applyCloaking(options: CloakingOptions): any {
         };
 
   const prefixIdx = remaining.findIndex(isPrefixBlock);
+  // The injected prefix only gets a breakpoint while one is left: a client that
+  // already uses all four would otherwise get a 400 for a fifth.
   const prefixBlock =
     prefixIdx >= 0
       ? remaining.splice(prefixIdx, 1)[0]
       : {
           type: "text",
           text: "You are Claude Code, Anthropic's official CLI for Claude.",
-          cache_control: injectedPrefixCacheControl(body),
+          ...(countCacheBreakpoints(body) < MAX_CACHE_BREAKPOINTS
+            ? { cache_control: injectedPrefixCacheControl(body) }
+            : {}),
         };
 
   // Reassemble: billing header (pos 0), prefix (pos 1), then the rest

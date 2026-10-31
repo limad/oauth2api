@@ -1341,3 +1341,28 @@ test("applyCloaking: injected prefix stays 5m when no 1h block is present", () =
   const prefix = out.system.find((b: any) => String(b.text).startsWith("You are Claude Code"));
   assert.deepEqual(prefix.cache_control, { type: "ephemeral" });
 });
+
+test("applyCloaking: no breakpoint on the injected prefix when the client already uses 4", () => {
+  const cfg: any = { cloaking: {} };
+  const acct: any = { deviceId: "d", accountUuid: "a" };
+  const req: any = { headers: { authorization: "Bearer k" }, body: {} };
+  const cc = { type: "ephemeral" };
+  const body = {
+    tools: [{ name: "t", input_schema: { type: "object" }, cache_control: cc }],
+    system: [{ type: "text", text: "client", cache_control: cc }],
+    messages: [
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "x", content: [{ type: "text", text: "r", cache_control: cc }] }] },
+      { role: "assistant", content: "ok" },
+      { role: "user", content: [{ type: "text", text: "hi", cache_control: cc }] },
+    ],
+  };
+  const out = applyCloaking({ request: req, account: acct, config: cfg, body });
+  const prefix = out.system.find((b: any) => String(b.text).startsWith("You are Claude Code"));
+  assert.equal(prefix.cache_control, undefined);
+  const three = applyCloaking({
+    request: req, account: acct, config: cfg,
+    body: { ...body, tools: [{ name: "t", input_schema: { type: "object" } }] },
+  });
+  const prefix3 = three.system.find((b: any) => String(b.text).startsWith("You are Claude Code"));
+  assert.deepEqual(prefix3.cache_control, { type: "ephemeral" });
+});
