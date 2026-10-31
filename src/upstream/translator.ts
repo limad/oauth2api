@@ -194,7 +194,11 @@ function convertToolResultContent(content: any): any {
   const blocks: any[] = [];
   for (const part of content) {
     if (part?.type === "text" && part.text) {
-      blocks.push({ type: "text", text: part.text });
+      blocks.push({
+        type: "text",
+        text: part.text,
+        ...(part.cache_control ? { cache_control: part.cache_control } : {}),
+      });
     } else if (part?.type === "image_url" && part.image_url?.url) {
       blocks.push(convertImage(part.image_url.url));
     } else if (part?.type === "image" && part.source) {
@@ -269,6 +273,23 @@ export function openaiToAnthropic(body: any): any {
 
   for (const msg of body.messages || []) {
     if (msg.role === "system" || msg.role === "developer") {
+      // A client marking system parts with cache_control (OpenRouter-style)
+      // keeps one block per part so the breakpoints survive; otherwise the
+      // parts are joined into one block as before.
+      if (
+        Array.isArray(msg.content) &&
+        msg.content.some((c: any) => c?.cache_control)
+      ) {
+        for (const c of msg.content) {
+          if (typeof c?.text !== "string" || !c.text) continue;
+          systemParts.push({
+            type: "text",
+            text: c.text,
+            ...(c.cache_control ? { cache_control: c.cache_control } : {}),
+          });
+        }
+        continue;
+      }
       const text =
         typeof msg.content === "string"
           ? msg.content

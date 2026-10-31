@@ -448,6 +448,30 @@ test("openaiToAnthropic translates basic request", () => {
   assert.deepEqual(result.messages, [{ role: "user", content: "hello" }]);
 });
 
+test("openaiToAnthropic keeps cache_control on system and tool-result text parts", () => {
+  const cc = { type: "ephemeral" };
+  const result = openaiToAnthropic({
+    model: "sonnet",
+    messages: [
+      { role: "system", content: [{ type: "text", text: "rules", cache_control: cc }, { type: "text", text: "more" }] },
+      { role: "user", content: "hi" },
+      { role: "assistant", content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "f", arguments: "{}" } }] },
+      { role: "tool", tool_call_id: "c1", content: [{ type: "text", text: "out", cache_control: cc }] },
+    ],
+  });
+  assert.deepEqual(result.system, [
+    { type: "text", text: "rules", cache_control: cc },
+    { type: "text", text: "more" },
+  ]);
+  assert.deepEqual(result.messages[2].content[0].content, [{ type: "text", text: "out", cache_control: cc }]);
+  // Without cache_control the system parts are still joined into one block.
+  const plain = openaiToAnthropic({
+    model: "sonnet",
+    messages: [{ role: "system", content: [{ type: "text", text: "a" }, { type: "text", text: "b" }] }, { role: "user", content: "hi" }],
+  });
+  assert.deepEqual(plain.system, [{ type: "text", text: "a\nb" }]);
+});
+
 test("openaiToAnthropic uses max_completion_tokens over max_tokens", () => {
   const result = openaiToAnthropic({
     model: "sonnet",
