@@ -762,3 +762,65 @@ test("drainCodexResponsesSse: surfaces response.failed errors", async () => {
   assert.equal(drained.upstreamError, "boom");
   assert.equal(drained.completedResponse, null);
 });
+
+// ── usage passthrough (cached / reasoning tokens) ──
+
+const CODEX_USAGE = {
+  input_tokens: 3566,
+  input_tokens_details: { cached_tokens: 3333 },
+  output_tokens: 44,
+  output_tokens_details: { reasoning_tokens: 5 },
+  total_tokens: 3610,
+};
+
+test("responsesToChatCompletion keeps cached and reasoning token details", () => {
+  const c = responsesToChatCompletion(
+    { status: "completed", output: [], usage: CODEX_USAGE },
+    "gpt-5.5",
+  );
+  assert.equal(c.usage.prompt_tokens, 3566);
+  assert.equal(c.usage.prompt_tokens_details.cached_tokens, 3333);
+  assert.equal(c.usage.completion_tokens_details.reasoning_tokens, 5);
+  assert.equal(c.usage.total_tokens, 3610);
+});
+
+test("responsesToAnthropicMessage splits cached prefix out of input_tokens", () => {
+  const m = responsesToAnthropicMessage(
+    { status: "completed", output: [], usage: CODEX_USAGE },
+    "gpt-5.5",
+  );
+  assert.equal(m.usage.input_tokens, 233);
+  assert.equal(m.usage.cache_read_input_tokens, 3333);
+  assert.equal(m.usage.cache_creation_input_tokens, 0);
+  assert.equal(m.usage.output_tokens, 44);
+});
+
+test("responsesSSEToChat emits a usage chunk only when include_usage is set", () => {
+  const done = { response: { status: "completed", usage: CODEX_USAGE } };
+  const off = responsesSSEToChat("response.completed", done, makeResponsesToChatState("gpt-5.5")).join("");
+  assert.doesNotMatch(off, /"usage"/);
+  const on = responsesSSEToChat("response.completed", done, makeResponsesToChatState("gpt-5.5", true));
+  const usageLine = on.find((c) => c.includes('"usage"'))!;
+  const parsed = JSON.parse(usageLine.slice("data: ".length));
+  assert.deepEqual(parsed.choices, []);
+  assert.equal(parsed.usage.prompt_tokens, 3566);
+  assert.equal(parsed.usage.prompt_tokens_details.cached_tokens, 3333);
+  assert.equal(on[on.length - 1], "data: [DONE]\n\n");
+});
+
+test("responsesSSEToAnthropic repeats final usage in message_delta", () => {
+  const state = makeResponsesToAnthropicState("gpt-5.5");
+  const out = responsesSSEToAnthropic(
+    "response.completed",
+    { response: { status: "completed", usage: CODEX_USAGE } },
+    state,
+  ).join("");
+  const delta = out.split("\n\n").find((e) => e.includes("message_delta"))!;
+  const data = JSON.parse(delta.split("\n").find((l) => l.startsWith("data: "))!.slice(6));
+  assert.deepEqual(data.usage, {
+    input_tokens: 233,
+    cache_creation_input_tokens: 0,
+    cache_read_input_tokens: 3333,
+    output_tokens: 44,
+  });
+});
