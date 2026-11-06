@@ -95,6 +95,8 @@ export interface ProxyOptions {
   errorAdapter?: (status: number, body: string) => any;
   maxRetries?: number;
   profile?: string;
+  /** Restricts rotation to accounts that can serve the requested model (Gemini/Antigravity catalogue differs per plan). */
+  accountFilter?: (email: string) => boolean;
 }
 
 function waitForRetry(ms: number, signal: AbortSignal): Promise<boolean> {
@@ -141,7 +143,7 @@ export async function proxyWithRetry(
 
   try {
     for (let attempt = 0; attempt < maxRetries; attempt++) {
-      const result = options.profile ? manager.getAccountByProfileId(options.profile) : manager.getNextAccount();
+      const result = options.profile ? manager.getAccountByProfileId(options.profile) : manager.getNextAccount(options.accountFilter);
       if (!result.account) {
         return accountUnavailable(resp, result, manager.provider);
       }

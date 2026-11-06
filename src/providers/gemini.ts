@@ -78,6 +78,13 @@ export function buildGeminiProvider(authDir: string): Provider {
         geminiApiBase: apiBase,
       };
     },
+    accountFilter: (model: string) => {
+      const id = model.startsWith(ANTIGRAVITY_PREFIX)
+        ? model.slice(ANTIGRAVITY_PREFIX.length)
+        : model;
+      const serving = catalog.accountsServing(id);
+      return serving ? (email: string) => serving.has(email) : undefined;
+    },
     listModels: async () =>
       (await catalog.list()).map((m) =>
         MODEL_RE.test(m.id) ? m : { ...m, id: `${ANTIGRAVITY_PREFIX}${m.id}` },

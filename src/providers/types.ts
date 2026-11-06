@@ -56,6 +56,8 @@ export interface Provider {
     expectedState: string,
     pkce: PKCECodes,
   ): Promise<TokenData>;
+  /** Optional: accounts allowed to serve `model` (undefined = any account). */
+  accountFilter?(model: string): ((email: string) => boolean) | undefined;
   /** Models advertised on /v1/models when this provider has accounts. */
   listModels(): Promise<ModelInfo[]>;
   /** Anthropic-Messages → upstream call. */

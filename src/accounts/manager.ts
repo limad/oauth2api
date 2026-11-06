@@ -363,11 +363,16 @@ export class AccountManager {
    * before rotating to the next one. Rotates early only when the current account
    * enters cooldown (e.g. rate-limited).
    */
-  getNextAccount(): AccountResult {
+  getNextAccount(accept?: (email: string) => boolean): AccountResult {
     const count = this.accountOrder.length;
     if (count === 0) {
       return { account: null, failureKind: null, retryAfterMs: null };
     }
+    // A filter that matches no account at all is ignored rather than failing the
+    // request: the upstream answer (404, 403...) is more useful than a local refusal.
+    const filter =
+      accept && this.accountOrder.some((e) => accept(e)) ? accept : undefined;
+    const allowed = (email: string) => !filter || filter(email);
 
     const now = Date.now();
 
@@ -375,7 +380,7 @@ export class AccountManager {
     if (this.lastUsedIndex >= 0 && now < this.stickyUntil) {
       const email = this.accountOrder[this.lastUsedIndex];
       const acct = this.accounts.get(email)!;
-      if (acct.cooldownUntil <= now) {
+      if (acct.cooldownUntil <= now && allowed(email)) {
         return {
           account: buildAvailableAccount(
             this.authDir,
@@ -393,7 +398,7 @@ export class AccountManager {
       const idx = (startIdx + i) % count;
       const email = this.accountOrder[idx];
       const acct = this.accounts.get(email)!;
-      if (acct.cooldownUntil <= now) {
+      if (acct.cooldownUntil <= now && allowed(email)) {
         this.lastUsedIndex = idx;
         this.stickyUntil = now + randomStickyDuration();
         return {

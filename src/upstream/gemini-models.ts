@@ -91,6 +91,8 @@ const REFRESH_MS = 60 * 60 * 1000;
  */
 export class GeminiCatalog {
   private models: ModelInfo[] = [];
+  /** Model ids each account can serve (from its own fetchAvailableModels). In memory only. */
+  private byAccount = new Map<string, Set<string>>();
   private fetchedAt = 0;
   private timer: NodeJS.Timeout | null = null;
   private readonly file: string;
@@ -132,6 +134,7 @@ export class GeminiCatalog {
     for (const acct of accounts) {
       const list = await fetchForAccount(acct.token);
       if (!list) continue;
+      this.byAccount.set(acct.token.email, new Set(list.map((m) => m.id)));
       for (const m of list) {
         if (!merged.has(m.id)) {
           merged.set(m.id, m);
@@ -151,6 +154,14 @@ export class GeminiCatalog {
     } catch (err: any) {
       console.error(`[gemini] cannot persist model catalogue: ${err?.message || err}`);
     }
+  }
+
+  /** Emails of accounts known to serve `modelId`, or null when no per-account catalogue is known yet. */
+  accountsServing(modelId: string): Set<string> | null {
+    if (this.byAccount.size === 0) return null;
+    const out = new Set<string>();
+    for (const [email, ids] of this.byAccount) if (ids.has(modelId)) out.add(email);
+    return out;
   }
 
   async list(): Promise<ModelInfo[]> {

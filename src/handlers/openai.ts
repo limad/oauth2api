@@ -93,6 +93,7 @@ async function proxyCodexChatCompletions(args: {
 
   await proxyWithRetry("ChatCompletions(codex)", resp, config, {
     manager: provider.manager,
+    accountFilter: provider.accountFilter?.(model),
     profile: req.header("x-auth2api-profile") || undefined,
     upstream: (account, signal) =>
       provider.callMessages({
@@ -227,6 +228,7 @@ async function proxyCodexResponses(args: {
 
   await proxyWithRetry("Responses(codex)", resp, config, {
     manager: provider.manager,
+    accountFilter: provider.accountFilter?.(model),
     profile: req.header("x-auth2api-profile") || undefined,
     upstream: (account, signal) =>
       provider.callMessages({
@@ -379,6 +381,7 @@ async function proxyCursorChatCompletions(args: {
 
   await proxyWithRetry("ChatCompletions(cursor)", resp, config, {
     manager: provider.manager,
+    accountFilter: provider.accountFilter?.(model),
     profile: req.header("x-auth2api-profile") || undefined,
     upstream: (account, signal) => {
       const cloaked =
@@ -520,6 +523,7 @@ export function createChatCompletionsHandler(
       if (provider.id === "copilot") {
         await proxyWithRetry("ChatCompletions(copilot)", resp, config, {
           manager: provider.manager,
+          accountFilter: provider.accountFilter?.(model),
           profile: req.header("x-auth2api-profile") || undefined,
           upstream: (account, signal) =>
             provider.callMessages({
@@ -596,6 +600,7 @@ export function createChatCompletionsHandler(
 
       await proxyWithRetry("ChatCompletions", resp, config, {
         manager: provider.manager,
+        accountFilter: provider.accountFilter?.(model),
         profile: req.header("x-auth2api-profile") || undefined,
         upstream: (account, signal) => {
           const cloaked =
@@ -707,6 +712,7 @@ export function createResponsesHandler(
         const normalizedBody = normalizeCursorResponsesBody(body);
         await proxyWithRetry("Responses", resp, config, {
           manager: provider.manager,
+          accountFilter: provider.accountFilter?.(model),
           profile: req.header("x-auth2api-profile") || undefined,
           upstream: (account, signal) =>
             provider.callMessages({
@@ -741,6 +747,7 @@ export function createResponsesHandler(
 
       await proxyWithRetry("Responses", resp, config, {
         manager: provider.manager,
+        accountFilter: provider.accountFilter?.(model),
         profile: req.header("x-auth2api-profile") || undefined,
         upstream: (account, signal) => {
           const cloaked =

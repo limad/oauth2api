@@ -1346,3 +1346,40 @@ test("normalizeNotifyHost: IPv4 / hostname pass through unchanged", () => {
   assert.equal(normalizeNotifyHost("localhost"), "localhost");
   assert.equal(normalizeNotifyHost("auth2api.local"), "auth2api.local");
 });
+
+// ══════════════════════════════════════════════════
+// AccountManager — per-model account filter (Gemini/Antigravity plans differ)
+// ══════════════════════════════════════════════════
+
+test("getNextAccount: filter skips accounts that cannot serve the model", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-"));
+  try {
+    const manager = new AccountManager(tmpDir, {
+      provider: "gemini",
+      refresh: async (): Promise<TokenData> => {
+        throw new Error("no refresh in this test");
+      },
+    });
+    const tok = (email: string): TokenData => ({
+      accessToken: "a",
+      refreshToken: "r",
+      email,
+      expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+      accountUuid: "u",
+      provider: "gemini",
+    });
+    manager.addAccount(tok("free@x"));
+    manager.addAccount(tok("pro@x"));
+
+    // Only the Pro account serves the model: always picked, even when free is next in rotation.
+    for (let i = 0; i < 5; i++) {
+      assert.equal(manager.getNextAccount((e) => e === "pro@x").account?.token.email, "pro@x");
+    }
+    // A filter that matches nobody is ignored (the upstream answer is more useful than a local refusal).
+    assert.ok(manager.getNextAccount(() => false).account);
+    // No filter: unchanged behaviour.
+    assert.ok(manager.getNextAccount().account);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
