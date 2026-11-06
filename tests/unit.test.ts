@@ -7,7 +7,11 @@ import { EventEmitter } from "node:events";
 
 import { extractApiKey, hashApiKey, timeout } from "../src/utils/common";
 import { combineAbortSignals } from "../src/utils/abort";
-import { classifyFailure, proxyWithRetry } from "../src/utils/http";
+import {
+  classifyFailure,
+  isAmbiguousGoogle429,
+  proxyWithRetry,
+} from "../src/utils/http";
 import { handleStreamingResponse } from "../src/upstream/streaming";
 import {
   resolveModel,
@@ -357,6 +361,204 @@ test("proxyWithRetry tags stats failure kind for upstream server errors", async 
   assert.equal(resp.locals.stats.accountEmail, "x@y.z");
   assert.equal(resp.locals.stats.provider, "anthropic");
   assert.equal(resp.locals.stats.failureKind, "server");
+});
+
+const BARE_GOOGLE_429 =
+  '{ "error": { "code": 429, "message": "Resource has been exhausted (e.g. check quota).", "status": "RESOURCE_EXHAUSTED" } }';
+
+const DETAILED_GOOGLE_429 = JSON.stringify({
+  error: {
+    code: 429,
+    message: "You have exhausted your capacity on this model.",
+    status: "RESOURCE_EXHAUSTED",
+    details: [
+      {
+        "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+        reason: "QUOTA_EXHAUSTED",
+      },
+    ],
+  },
+});
+
+test("isAmbiguousGoogle429 detects bare Google 429 without details", () => {
+  assert.equal(isAmbiguousGoogle429(429, BARE_GOOGLE_429), true);
+  assert.equal(
+    isAmbiguousGoogle429(
+      429,
+      JSON.stringify({
+        error: {
+          code: 429,
+          message: "Resource has been exhausted (e.g. check quota).",
+          status: "RESOURCE_EXHAUSTED",
+          details: [],
+        },
+      }),
+    ),
+    true,
+  );
+  assert.equal(isAmbiguousGoogle429(429, DETAILED_GOOGLE_429), false);
+  assert.equal(isAmbiguousGoogle429(429, "not-valid-json{"), false);
+  assert.equal(isAmbiguousGoogle429(500, BARE_GOOGLE_429), false);
+});
+
+test("proxyWithRetry does not cool down accounts when two accounts return bare Google 429", async () => {
+  const resp = makeMockResponse();
+  const accounts = [
+    { token: { email: "first@g.com" } },
+    { token: { email: "second@g.com" } },
+  ];
+  const failures: Array<{ email: string; kind: string }> = [];
+  let upstreamCalls = 0;
+
+  const manager: any = {
+    provider: "gemini",
+    getNextAccount: (accept?: (email: string) => boolean) => {
+      const found = accounts.find((a) => !accept || accept(a.token.email));
+      return found
+        ? { account: found }
+        : { account: null, failureKind: "rate_limit", retryAfterMs: 1000 };
+    },
+    recordAttempt: () => {},
+    recordFailure: (email: string, kind: string) => {
+      failures.push({ email, kind });
+    },
+    refreshAccount: async () => false,
+  };
+
+  await proxyWithRetry("TestGemini", resp, { debug: "off" } as any, {
+    manager,
+    maxRetries: 3,
+    upstream: async () => {
+      upstreamCalls++;
+      return new Response(BARE_GOOGLE_429, { status: 429 });
+    },
+    success: async () => {},
+  });
+
+  assert.equal(upstreamCalls, 2);
+  assert.deepEqual(failures, []);
+  assert.equal(resp.statusCode, 429);
+  assert.equal(resp.body?.error?.type, "upstream_request_rejected");
+  assert.match(String(resp.body?.error?.message), /sur 2 comptes/);
+});
+
+test("proxyWithRetry records rate_limit on first account when second account succeeds after bare Google 429", async () => {
+  const resp = makeMockResponse();
+  const accounts = [
+    { token: { email: "first@g.com" } },
+    { token: { email: "second@g.com" } },
+  ];
+  const failures: Array<{ email: string; kind: string }> = [];
+  let succeededWith: string | null = null;
+
+  const manager: any = {
+    provider: "gemini",
+    getNextAccount: (accept?: (email: string) => boolean) => {
+      const found = accounts.find((a) => !accept || accept(a.token.email));
+      return found
+        ? { account: found }
+        : { account: null, failureKind: "rate_limit", retryAfterMs: 1000 };
+    },
+    recordAttempt: () => {},
+    recordFailure: (email: string, kind: string) => {
+      failures.push({ email, kind });
+    },
+    refreshAccount: async () => false,
+  };
+
+  await proxyWithRetry("TestGemini", resp, { debug: "off" } as any, {
+    manager,
+    maxRetries: 3,
+    upstream: async (account) => {
+      if (account.token.email === "first@g.com") {
+        return new Response(BARE_GOOGLE_429, { status: 429 });
+      }
+      return new Response('{"ok":true}', { status: 200 });
+    },
+    success: async (_upstream, account) => {
+      succeededWith = account.token.email;
+      resp.status(200).json({ ok: true });
+    },
+  });
+
+  assert.equal(succeededWith, "second@g.com");
+  assert.deepEqual(failures, [{ email: "first@g.com", kind: "rate_limit" }]);
+  assert.equal(resp.statusCode, 200);
+});
+
+test("proxyWithRetry does not loop or cool down when only one account is available on bare Google 429", async () => {
+  const resp = makeMockResponse();
+  const soloAccount: any = { token: { email: "solo@g.com" } };
+  const failures: Array<{ email: string; kind: string }> = [];
+  let upstreamCalls = 0;
+
+  const manager: any = {
+    provider: "gemini",
+    // Mirrors AccountManager.getNextAccount when filter matches no other account:
+    // ignores filter and returns the only account.
+    getNextAccount: () => ({ account: soloAccount }),
+    recordAttempt: () => {},
+    recordFailure: (email: string, kind: string) => {
+      failures.push({ email, kind });
+    },
+    refreshAccount: async () => false,
+  };
+
+  await proxyWithRetry("TestGemini", resp, { debug: "off" } as any, {
+    manager,
+    maxRetries: 3,
+    upstream: async () => {
+      upstreamCalls++;
+      return new Response(BARE_GOOGLE_429, { status: 429 });
+    },
+    success: async () => {},
+  });
+
+  assert.equal(upstreamCalls, 1);
+  assert.deepEqual(failures, []);
+  assert.equal(resp.statusCode, 429);
+  assert.equal(resp.body?.error?.type, "upstream_request_rejected");
+});
+
+test("proxyWithRetry does not fall back to an account outside the model filter after bare Google 429", async () => {
+  const resp = makeMockResponse();
+  const accounts = [
+    { token: { email: "pro@g.com" } },
+    { token: { email: "free@g.com" } },
+  ];
+  const failures: Array<{ email: string; kind: string }> = [];
+  const called: string[] = [];
+
+  const manager: any = {
+    provider: "gemini",
+    // Mirrors AccountManager: a filter that matches no account is ignored.
+    getNextAccount: (accept?: (email: string) => boolean) => {
+      const filter =
+        accept && accounts.some((a) => accept(a.token.email)) ? accept : undefined;
+      return { account: accounts.find((a) => !filter || filter(a.token.email)) };
+    },
+    recordAttempt: () => {},
+    recordFailure: (email: string, kind: string) => {
+      failures.push({ email, kind });
+    },
+    refreshAccount: async () => false,
+  };
+
+  await proxyWithRetry("TestGemini", resp, { debug: "off" } as any, {
+    manager,
+    maxRetries: 3,
+    accountFilter: (email) => email === "pro@g.com",
+    upstream: async (account) => {
+      called.push(account.token.email);
+      return new Response(BARE_GOOGLE_429, { status: 429 });
+    },
+    success: async () => {},
+  });
+
+  assert.deepEqual(called, ["pro@g.com"]);
+  assert.deepEqual(failures, []);
+  assert.equal(resp.statusCode, 429);
+  assert.equal(resp.body?.error?.type, "upstream_request_rejected");
 });
 
 // ══════════════════════════════════════════════════
