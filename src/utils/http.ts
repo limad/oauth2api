@@ -18,6 +18,26 @@ export function classifyFailure(status: number): AccountFailureKind {
   return "server";
 }
 
+/**
+ * Detects a bare Google Code Assist 429 (`status: "RESOURCE_EXHAUSTED"` with no
+ * `error.details`), which Google sometimes returns when rejecting a request
+ * payload regardless of account quota. Real quota exhaustion carries structured
+ * `error.details` (`google.rpc.ErrorInfo` / `google.rpc.RetryInfo`).
+ */
+export function isAmbiguousGoogle429(status: number, body: string): boolean {
+  if (status !== 429 || !body) return false;
+  try {
+    const parsed = JSON.parse(body);
+    const err = parsed?.error;
+    if (!err || typeof err !== "object") return false;
+    if (err.status !== "RESOURCE_EXHAUSTED") return false;
+    if (Array.isArray(err.details)) return err.details.length === 0;
+    return !err.details;
+  } catch {
+    return false;
+  }
+}
+
 const FAILURE_RESPONSES: Record<
   AccountFailureKind,
   { status: number; message: string }
@@ -120,6 +140,15 @@ function waitForRetry(ms: number, signal: AbortSignal): Promise<boolean> {
   });
 }
 
+function ambiguous429RejectionBody(count: number): string {
+  return JSON.stringify({
+    error: {
+      message: `Google a refusé cette requête (429 RESOURCE_EXHAUSTED sans détail de quota) sur ${count} comptes : rejet probablement lié au contenu de la requête, comptes non mis en pause`,
+      type: "upstream_request_rejected",
+    },
+  });
+}
+
 export async function proxyWithRetry(
   tag: string,
   resp: ExpressResponse,
@@ -132,6 +161,7 @@ export async function proxyWithRetry(
   let lastErrBody = "";
   let lastRetryAfter: string | null = null;
   const refreshedAccounts = new Set<string>();
+  const ambiguousAccounts: string[] = [];
 
   const requestController = new AbortController();
   const abortRequest = () => {
@@ -143,11 +173,47 @@ export async function proxyWithRetry(
 
   try {
     for (let attempt = 0; attempt < maxRetries; attempt++) {
-      const result = options.profile ? manager.getAccountByProfileId(options.profile) : manager.getNextAccount(options.accountFilter);
+      const accountFilter =
+        ambiguousAccounts.length > 0
+          ? (email: string) =>
+              !ambiguousAccounts.includes(email) &&
+              (!options.accountFilter || options.accountFilter(email))
+          : options.accountFilter;
+      const result = options.profile
+        ? manager.getAccountByProfileId(options.profile)
+        : manager.getNextAccount(accountFilter);
       if (!result.account) {
+        if (ambiguousAccounts.length > 0) {
+          if (isDebugLevel(config.debug, "errors")) {
+            console.error(
+              `${tag} ambiguous Google 429 on ${ambiguousAccounts.join(", ")} and no other account available: rejecting request without account cooldown`,
+            );
+          }
+          lastStatus = 429;
+          lastRetryAfter = null;
+          lastErrBody = ambiguous429RejectionBody(ambiguousAccounts.length);
+          break;
+        }
         return accountUnavailable(resp, result, manager.provider);
       }
       const account = result.account;
+      // getNextAccount ignores a filter that matches no account, so it can hand
+      // back an already-rejected account or one that cannot serve the model.
+      if (
+        ambiguousAccounts.length > 0 &&
+        accountFilter &&
+        !accountFilter(account.token.email)
+      ) {
+        if (isDebugLevel(config.debug, "errors")) {
+          console.error(
+            `${tag} ambiguous Google 429 on ${ambiguousAccounts.join(", ")} and no other eligible account: rejecting request without account cooldown`,
+          );
+        }
+        lastStatus = 429;
+        lastRetryAfter = null;
+        lastErrBody = ambiguous429RejectionBody(ambiguousAccounts.length);
+        break;
+      }
       manager.recordAttempt(account.token.email);
       // Surface upstream account attribution to the per-request stats slot
       // (set by server.ts requireApiKey middleware). Done here so failure
@@ -184,6 +250,16 @@ export async function proxyWithRetry(
       }
 
       if (upstream.ok) {
+        if (ambiguousAccounts.length > 0) {
+          if (isDebugLevel(config.debug, "errors")) {
+            console.error(
+              `${tag} retry succeeded on ${account.token.email}: recording rate_limit failure for ${ambiguousAccounts.join(", ")}`,
+            );
+          }
+          for (const email of ambiguousAccounts) {
+            manager.recordFailure(email, "rate_limit");
+          }
+        }
         tagStatsFailure(resp, null, manager.provider);
         try {
           await options.success(upstream, account);
@@ -227,7 +303,26 @@ export async function proxyWithRetry(
         /* ignore */
       }
 
-      if (lastStatus === 401) {
+      if (isAmbiguousGoogle429(lastStatus, lastErrBody)) {
+        if (!ambiguousAccounts.includes(account.token.email)) {
+          ambiguousAccounts.push(account.token.email);
+        }
+        if (ambiguousAccounts.length >= 2 || attempt >= maxRetries - 1) {
+          if (isDebugLevel(config.debug, "errors")) {
+            console.error(
+              `${tag} ambiguous Google 429 on ${ambiguousAccounts.length} account(s) (${ambiguousAccounts.join(", ")}): rejecting request without account cooldown`,
+            );
+          }
+          lastRetryAfter = null;
+          lastErrBody = ambiguous429RejectionBody(ambiguousAccounts.length);
+          break;
+        }
+        if (isDebugLevel(config.debug, "errors")) {
+          console.error(
+            `${tag} ambiguous Google 429 on ${account.token.email}: deferring cooldown and retrying on another account`,
+          );
+        }
+      } else if (lastStatus === 401) {
         // Only refresh once per account per proxy attempt. A second 401 after a
         // successful refresh usually means the cause isn't the access token (bad
         // header, account state, server-side issue) — refreshing again would
