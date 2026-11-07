@@ -142,6 +142,127 @@ function buildHeaders(
   };
 }
 
+/**
+ * Mistral reasoning models (mistral-large-4, magistral with thinking) answer
+ * `content` as chunks: [{type:"thinking", thinking:[{type:"text",text}]},
+ * {type:"text", text}] — non-stream and in stream deltas (seen live on
+ * 2026-11-07). OpenAI clients expect a string: the text goes to `content`, the
+ * thinking to `reasoning_content` (DeepSeek convention, already used by our
+ * Codex/Cursor chat output). Strings are left untouched.
+ */
+export function splitMistralContent(
+  content: unknown,
+): { text: string; reasoning: string } | null {
+  if (!Array.isArray(content)) return null;
+  let text = "";
+  let reasoning = "";
+  const textOf = (v: unknown): string =>
+    typeof v === "string"
+      ? v
+      : Array.isArray(v)
+        ? v
+            .map((p: any) => (typeof p?.text === "string" ? p.text : ""))
+            .join("")
+        : "";
+  for (const part of content as any[]) {
+    if (part?.type === "thinking") reasoning += textOf(part.thinking);
+    else if (part?.type === "text" && typeof part.text === "string")
+      text += part.text;
+  }
+  return { text, reasoning };
+}
+
+function normalizeChoiceContent(target: any, isDelta: boolean): boolean {
+  if (!target || typeof target !== "object") return false;
+  const split = splitMistralContent(target.content);
+  if (!split) return false;
+  if (split.text || !isDelta) target.content = split.text;
+  else delete target.content;
+  if (split.reasoning) {
+    target.reasoning_content =
+      (target.reasoning_content || "") + split.reasoning;
+  }
+  return true;
+}
+
+/** Non-stream body: rewrites choices[].message; returns true when something changed. */
+export function normalizeMistralChatResponse(json: any): boolean {
+  let changed = false;
+  for (const c of Array.isArray(json?.choices) ? json.choices : []) {
+    if (normalizeChoiceContent(c?.message, false)) changed = true;
+  }
+  return changed;
+}
+
+/** Stream chunk: rewrites choices[].delta; returns true when something changed. */
+export function normalizeMistralChunk(json: any): boolean {
+  let changed = false;
+  for (const c of Array.isArray(json?.choices) ? json.choices : []) {
+    if (normalizeChoiceContent(c?.delta, true)) changed = true;
+  }
+  return changed;
+}
+
+/** SSE byte stream -> same stream; only `data:` lines whose content is an array are re-encoded. */
+export function mistralSseTransform(): TransformStream<Uint8Array, Uint8Array> {
+  const decoder = new TextDecoder();
+  const encoder = new TextEncoder();
+  let buffer = "";
+  const fix = (line: string): string => {
+    if (!line.startsWith("data:") || !line.includes('"content":[')) return line;
+    try {
+      const json = JSON.parse(line.slice(5).trim());
+      return normalizeMistralChunk(json)
+        ? `data: ${JSON.stringify(json)}`
+        : line;
+    } catch {
+      return line;
+    }
+  };
+  return new TransformStream({
+    transform(chunk, controller) {
+      buffer += decoder.decode(chunk, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+      if (lines.length)
+        controller.enqueue(encoder.encode(lines.map(fix).join("\n") + "\n"));
+    },
+    flush(controller) {
+      buffer += decoder.decode();
+      if (buffer) controller.enqueue(encoder.encode(fix(buffer)));
+    },
+  });
+}
+
+function rebuilt(resp: Response, body: BodyInit): Response {
+  const headers = new Headers(resp.headers);
+  headers.delete("content-length");
+  headers.delete("content-encoding");
+  return new Response(body, {
+    status: resp.status,
+    statusText: resp.statusText,
+    headers,
+  });
+}
+
+async function normalizeMistralResponse(
+  resp: Response,
+  stream: boolean,
+): Promise<Response> {
+  if (!resp.ok || !resp.body) return resp;
+  if (stream)
+    return rebuilt(resp, resp.body.pipeThrough(mistralSseTransform()));
+  const text = await resp.text();
+  try {
+    const json = JSON.parse(text);
+    if (normalizeMistralChatResponse(json))
+      return rebuilt(resp, JSON.stringify(json));
+  } catch {
+    /* not JSON: hand it back as is */
+  }
+  return rebuilt(resp, text);
+}
+
 export async function callMistralChatCompletions(
   options: CallMistralOptions,
 ): Promise<Response> {
@@ -152,12 +273,13 @@ export async function callMistralChatCompletions(
     ? config.timeouts["stream-messages-ms"]
     : config.timeouts["messages-ms"];
   try {
-    return await fetch(CHAT_COMPLETIONS_URL, {
+    const resp = await fetch(CHAT_COMPLETIONS_URL, {
       method: "POST",
       headers: buildHeaders(account, stream),
       body: JSON.stringify(body),
       signal: withTimeoutSignal(timeoutMs, options.signal),
     });
+    return await normalizeMistralResponse(resp, stream);
   } catch (err: any) {
     const cause = err?.cause;
     const detail = cause

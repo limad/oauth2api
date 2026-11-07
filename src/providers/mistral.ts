@@ -43,6 +43,9 @@ export function buildMistralProvider(authDir: string): Provider {
   return {
     id: "mistral",
     nativeFormat: "openai-chat",
+    // 403 = model/feature not enabled for this organisation (e.g. Labs models,
+    // `labs_not_enabled`); a revoked key answers 401.
+    requestErrorStatuses: [403],
     manager,
     oauth: MISTRAL_OAUTH,
     matchesModel: (model: string) =>

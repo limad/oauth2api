@@ -35,12 +35,28 @@ function openaiErrorBody(status: number, body: string): any {
     const parsed = JSON.parse(body);
     // Codex backend uses { detail: "..." }; Anthropic uses { error: {...} };
     // OpenAI itself uses { error: { message, type, code } }.
+    // Mistral uses { object: "error", message: "..." | { detail: [...] }, type }
+    // or a bare FastAPI { detail: [...] } for 422 validation errors.
+    const detail = Array.isArray(parsed?.detail)
+      ? parsed.detail
+      : Array.isArray(parsed?.message?.detail)
+        ? parsed.message.detail
+        : null;
     const msg =
       parsed?.error?.message ||
       (typeof parsed?.detail === "string" ? parsed.detail : null) ||
       parsed?.error?.error?.message ||
+      (typeof parsed?.message === "string" ? parsed.message : null) ||
+      (detail
+        ? detail
+            .map((d: any) => `${(d?.loc || []).join(".")}: ${d?.msg || ""}`)
+            .join("; ")
+        : null) ||
       "Upstream request failed";
-    const type = parsed?.error?.type || "upstream_error";
+    const type =
+      parsed?.error?.type ||
+      (typeof parsed?.type === "string" ? parsed.type : null) ||
+      "upstream_error";
     return { error: { message: msg, type } };
   } catch {
     return {
@@ -525,6 +541,7 @@ export function createChatCompletionsHandler(
       if (provider.nativeFormat === "openai-chat") {
         await proxyWithRetry(`ChatCompletions(${provider.id})`, resp, config, {
           manager: provider.manager,
+          requestErrorStatuses: provider.requestErrorStatuses,
           accountFilter: provider.accountFilter?.(model),
           profile: req.header("x-auth2api-profile") || undefined,
           upstream: (account, signal) =>
@@ -539,7 +556,10 @@ export function createChatCompletionsHandler(
             if (stream) {
               const result = await handleStreamingResponse(upstream, resp);
               if (result.completed) {
-                provider.manager.recordSuccess(account.token.email, result.usage);
+                provider.manager.recordSuccess(
+                  account.token.email,
+                  result.usage,
+                );
               } else if (!result.clientDisconnected) {
                 provider.manager.recordFailure(
                   account.token.email,
@@ -870,7 +890,8 @@ export function createResponsesCompactHandler(
 
           const codexCompactUsage = {
             inputTokens: usage?.input_tokens || streamUsage?.inputTokens || 0,
-            outputTokens: usage?.output_tokens || streamUsage?.outputTokens || 0,
+            outputTokens:
+              usage?.output_tokens || streamUsage?.outputTokens || 0,
             cacheCreationInputTokens: 0,
             cacheReadInputTokens:
               usage?.input_tokens_details?.cached_tokens ||
