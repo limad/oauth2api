@@ -5,7 +5,11 @@ import { Config } from "../config";
 
 export type { ProviderId };
 
-export type NativeFormat = "anthropic-messages" | "openai-responses";
+/**
+ * Body format the provider's outbound API expects. "openai-chat" providers
+ * (Copilot, Mistral) only serve /v1/chat/completions, passed through.
+ */
+export type NativeFormat = "anthropic-messages" | "openai-responses" | "openai-chat";
 
 export interface UpstreamCallContext {
   body?: any;

@@ -30,7 +30,7 @@ export function buildCopilotProvider(authDir: string): Provider {
 
   return {
     id: "copilot",
-    nativeFormat: "openai-responses",
+    nativeFormat: "openai-chat",
     manager,
     oauth: COPILOT_OAUTH,
     matchesModel: (model: string) => MODEL_RE.test(model),

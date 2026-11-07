@@ -203,7 +203,7 @@ export function createMessagesHandler(
       // re-encode the SSE stream as Anthropic Messages when invoked through
       // /v1/messages.
       if (
-        provider.nativeFormat === "openai-responses" &&
+        provider.nativeFormat !== "anthropic-messages" &&
         provider.id !== "cursor"
       ) {
         resp.status(400).json({

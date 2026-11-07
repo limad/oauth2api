@@ -1,5 +1,5 @@
 import { Response as ExpressResponse } from "express";
-import { UsageData } from "../accounts/manager";
+import { UsageData, chatCompletionsUsage } from "../accounts/manager";
 
 /**
  * Read an upstream Response as a stream of SSE `(event, data)` pairs.
@@ -119,6 +119,11 @@ function extractUsageFromSSE(event: string, data: any, usage: UsageData): void {
       u.output_tokens_details?.reasoning_tokens || 0;
     // Codex has no cache_creation analog; leave at default.
     return;
+  }
+  // OpenAI Chat Completions stream (Copilot, Mistral): unnamed events, usage
+  // on the last chunk(s).
+  if (!event && data?.object === "chat.completion.chunk" && data.usage) {
+    Object.assign(usage, chatCompletionsUsage(data.usage));
   }
 }
 

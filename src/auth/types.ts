@@ -1,4 +1,10 @@
-export type ProviderId = "anthropic" | "codex" | "cursor" | "copilot" | "gemini";
+export type ProviderId =
+  | "anthropic"
+  | "codex"
+  | "cursor"
+  | "copilot"
+  | "gemini"
+  | "mistral";
 
 export interface PKCECodes {
   codeVerifier: string;
@@ -15,7 +21,7 @@ export interface TokenData {
   idToken?: string; // codex only
   /** ISO 8601 of last successful refresh (or initial token issuance). */
   lastRefreshAt?: string;
-  /** Codex only — raw chatgpt_plan_type claim from id_token (free/plus/pro/…). */
+  /** Codex: raw chatgpt_plan_type claim (free/plus/pro/…). Mistral: billing plan_name (FREE/PRO/…). */
   planType?: string;
   /** Cursor only — stable machine id read from Cursor's local storage. */
   cursorServiceMachineId?: string;
