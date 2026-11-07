@@ -30,7 +30,7 @@ import {
   drainCodexResponsesSse,
 } from "../upstream/responses-translator";
 
-function openaiErrorBody(status: number, body: string): any {
+export function openaiErrorBody(status: number, body: string): any {
   try {
     const parsed = JSON.parse(body);
     // Codex backend uses { detail: "..." }; Anthropic uses { error: {...} };

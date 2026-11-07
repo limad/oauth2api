@@ -130,16 +130,30 @@ export function normalizeMistralChatBody(body: any): any {
   return next;
 }
 
+// Vibe sends its session id as `x-affinity` so a conversation stays on the
+// same Mistral backend (prompt cache hits). Forwarded only when the client
+// sends one; nothing is generated here.
+const AFFINITY_RE = /^[A-Za-z0-9._:-]{1,128}$/;
+
+export function clientAffinity(request?: Pick<Request, "header">): string | undefined {
+  const v = request?.header?.("x-affinity");
+  return typeof v === "string" && AFFINITY_RE.test(v.trim()) ? v.trim() : undefined;
+}
+
 function buildHeaders(
   account: AvailableAccount,
   stream: boolean,
+  affinity?: string,
+  contentType: string = "application/json",
 ): Record<string, string> {
-  return {
-    "Content-Type": "application/json",
+  const headers: Record<string, string> = {
+    "Content-Type": contentType,
     Accept: stream ? "text/event-stream" : "application/json",
     Authorization: `Bearer ${account.token.accessToken}`,
     "User-Agent": MISTRAL_VIBE_USER_AGENT,
   };
+  if (affinity) headers["x-affinity"] = affinity;
+  return headers;
 }
 
 /**
@@ -275,7 +289,7 @@ export async function callMistralChatCompletions(
   try {
     const resp = await fetch(CHAT_COMPLETIONS_URL, {
       method: "POST",
-      headers: buildHeaders(account, stream),
+      headers: buildHeaders(account, stream, clientAffinity(request)),
       body: JSON.stringify(body),
       signal: withTimeoutSignal(timeoutMs, options.signal),
     });
@@ -287,6 +301,90 @@ export async function callMistralChatCompletions(
       : err?.message || String(err);
     throw new Error(`mistral upstream fetch failed: ${detail}`);
   }
+}
+
+/** Mistral-only routes relayed as is (no OpenAI equivalent upstream elsewhere). */
+export const MISTRAL_EXTRA_PATHS = {
+  fim: "/v1/fim/completions",
+  embeddings: "/v1/embeddings",
+  ocr: "/v1/ocr",
+  transcriptions: "/v1/audio/transcriptions",
+} as const;
+export type MistralExtraKind = keyof typeof MISTRAL_EXTRA_PATHS;
+
+export interface CallMistralExtraOptions {
+  kind: MistralExtraKind;
+  /** JSON object, or the raw multipart body (audio). */
+  body: any;
+  contentType?: string;
+  stream: boolean;
+  account: AvailableAccount;
+  config: Config;
+  affinity?: string;
+  signal?: AbortSignal;
+}
+
+/** Pass-through POST to one of MISTRAL_EXTRA_PATHS: the body is sent untouched. */
+export async function callMistralExtra(
+  options: CallMistralExtraOptions,
+): Promise<Response> {
+  const { kind, body, account, config, stream } = options;
+  const raw = Buffer.isBuffer(body);
+  const timeoutMs = stream
+    ? config.timeouts["stream-messages-ms"]
+    : config.timeouts["messages-ms"];
+  try {
+    const resp = await fetch(`${MISTRAL_API_BASE}${MISTRAL_EXTRA_PATHS[kind]}`, {
+      method: "POST",
+      headers: buildHeaders(
+        account,
+        stream,
+        options.affinity,
+        raw ? options.contentType || "application/octet-stream" : "application/json",
+      ),
+      body: raw ? new Uint8Array(body) : JSON.stringify(body),
+      signal: withTimeoutSignal(timeoutMs, options.signal),
+    });
+    return resp;
+  } catch (err: any) {
+    const cause = err?.cause;
+    const detail = cause
+      ? `${cause.code || cause.name || "error"}: ${cause.message || String(cause)}`
+      : err?.message || String(err);
+    throw new Error(`mistral upstream fetch failed: ${detail}`);
+  }
+}
+
+/** Value of one text field of a multipart/form-data body (null when absent). */
+export function multipartField(body: Buffer, name: string): string | null {
+  const marker = Buffer.from(`name="${name}"`);
+  const at = body.indexOf(marker);
+  if (at < 0) return null;
+  const start = body.indexOf("\r\n\r\n", at);
+  if (start < 0) return null;
+  const end = body.indexOf("\r\n--", start + 4);
+  if (end < 0) return null;
+  return body.subarray(start + 4, end).toString("utf8");
+}
+
+/** Same body with one multipart text field replaced (unchanged if absent). */
+export function replaceMultipartField(
+  body: Buffer,
+  name: string,
+  value: string,
+): Buffer {
+  const marker = Buffer.from(`name="${name}"`);
+  const at = body.indexOf(marker);
+  if (at < 0) return body;
+  const start = body.indexOf("\r\n\r\n", at);
+  if (start < 0) return body;
+  const end = body.indexOf("\r\n--", start + 4);
+  if (end < 0) return body;
+  return Buffer.concat([
+    body.subarray(0, start + 4),
+    Buffer.from(value, "utf8"),
+    body.subarray(end),
+  ]);
 }
 
 interface MistralModel {
