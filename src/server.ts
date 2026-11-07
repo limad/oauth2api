@@ -1,4 +1,5 @@
 import { modelAliasMiddleware } from "./utils/model-echo";
+import { createMistralExtraHandler } from "./handlers/mistral-extra";
 import express from "express";
 import net from "net";
 import { Config, isDebugLevel } from "./config";
@@ -393,6 +394,16 @@ export function createServer(
   app.post(
     "/v1/messages/count_tokens",
     createCountTokensHandler(config, registry),
+  );
+
+  // Routes — Mistral-only (FIM, embeddings, OCR, audio), relayed as is
+  app.post("/v1/fim/completions", createMistralExtraHandler("fim", config, registry));
+  app.post("/v1/embeddings", createMistralExtraHandler("embeddings", config, registry));
+  app.post("/v1/ocr", createMistralExtraHandler("ocr", config, registry));
+  app.post(
+    "/v1/audio/transcriptions",
+    express.raw({ type: "multipart/form-data", limit: config["body-limit"] }),
+    createMistralExtraHandler("transcriptions", config, registry),
   );
 
   return app;
