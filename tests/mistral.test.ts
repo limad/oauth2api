@@ -7,6 +7,9 @@ import path from "node:path";
 import { buildRegistry } from "../src/providers/registry";
 import { mistralListedId } from "../src/providers/mistral";
 import {
+  normalizeMistralChatResponse,
+  mistralSseTransform,
+  splitMistralContent,
   normalizeMistralChatBody,
   mistralModelsFromResponse,
   stripMistralPrefix,
@@ -451,4 +454,78 @@ test("Vibe sign-in: 429 on poll backs off and keeps polling, 429 on start is exp
     runVibeBrowserLogin({ fetchImpl: limited.impl, sleep: async () => {} }),
     /retry in a few minutes/,
   );
+});
+
+const THINKING = [
+  {
+    type: "thinking",
+    thinking: [
+      { type: "text", text: "2+2 " },
+      { type: "text", text: "= 4" },
+    ],
+    closed: true,
+  },
+  { type: "text", text: "4" },
+];
+
+test("thinking chunks: text -> content, thinking -> reasoning_content; strings untouched", () => {
+  assert.deepEqual(splitMistralContent(THINKING), {
+    text: "4",
+    reasoning: "2+2 = 4",
+  });
+  assert.equal(splitMistralContent("4"), null);
+  const json = {
+    choices: [{ index: 0, message: { role: "assistant", content: THINKING } }],
+  };
+  assert.equal(normalizeMistralChatResponse(json), true);
+  assert.deepEqual(json.choices[0].message, {
+    role: "assistant",
+    content: "4",
+    reasoning_content: "2+2 = 4",
+  });
+  const plain = {
+    choices: [{ message: { role: "assistant", content: "ok" } }],
+  };
+  assert.equal(normalizeMistralChatResponse(plain), false);
+  assert.equal(plain.choices[0].message.content, "ok");
+});
+
+async function pipe(parts: string[]): Promise<string> {
+  const enc = new TextEncoder();
+  const src = new ReadableStream<Uint8Array>({
+    start(c) {
+      for (const p of parts) c.enqueue(enc.encode(p));
+      c.close();
+    },
+  });
+  return new Response(src.pipeThrough(mistralSseTransform())).text();
+}
+
+test("SSE: array deltas re-encoded, other lines byte-identical, split chunks handled", async () => {
+  const think = JSON.stringify({
+    object: "chat.completion.chunk",
+    choices: [{ index: 0, delta: { content: [THINKING[0]] } }],
+  });
+  const plain = JSON.stringify({
+    object: "chat.completion.chunk",
+    choices: [{ index: 0, delta: { content: "4" }, finish_reason: "stop" }],
+    usage: { prompt_tokens: 1 },
+  });
+  const raw = `data: ${think}\n\ndata: ${plain}\n\ndata: [DONE]\n\n`;
+  const cut = Math.floor(raw.length / 3);
+  const out = await pipe([
+    raw.slice(0, cut),
+    raw.slice(cut, cut * 2),
+    raw.slice(cut * 2),
+  ]);
+  const lines = out.split("\n").filter(Boolean);
+  assert.equal(lines.length, 3);
+  assert.deepEqual(JSON.parse(lines[0].slice(6)).choices[0].delta, {
+    reasoning_content: "2+2 = 4",
+  });
+  assert.equal(lines[1], `data: ${plain}`);
+  assert.equal(lines[2], "data: [DONE]");
+  // A stream without arrays comes out byte-identical.
+  const same = `data: ${plain}\n\ndata: [DONE]\n\n`;
+  assert.equal(await pipe([same]), same);
 });

@@ -9,7 +9,10 @@ export type { ProviderId };
  * Body format the provider's outbound API expects. "openai-chat" providers
  * (Copilot, Mistral) only serve /v1/chat/completions, passed through.
  */
-export type NativeFormat = "anthropic-messages" | "openai-responses" | "openai-chat";
+export type NativeFormat =
+  | "anthropic-messages"
+  | "openai-responses"
+  | "openai-chat";
 
 export interface UpstreamCallContext {
   body?: any;
@@ -60,6 +63,8 @@ export interface Provider {
     expectedState: string,
     pkce: PKCECodes,
   ): Promise<TokenData>;
+  /** Optional: upstream statuses that refuse the request, not the account (see ProxyOptions). */
+  requestErrorStatuses?: readonly number[];
   /** Optional: accounts allowed to serve `model` (undefined = any account). */
   accountFilter?(model: string): ((email: string) => boolean) | undefined;
   /** Models advertised on /v1/models when this provider has accounts. */

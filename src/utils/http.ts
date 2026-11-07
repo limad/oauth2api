@@ -117,6 +117,13 @@ export interface ProxyOptions {
   profile?: string;
   /** Restricts rotation to accounts that can serve the requested model (Gemini/Antigravity catalogue differs per plan). */
   accountFilter?: (email: string) => boolean;
+  /**
+   * Upstream statuses that mean "this request is refused", not "this account is
+   * unusable": no cooldown, no retry, surfaced to the client. Mistral answers 403
+   * for one model or feature (e.g. Labs models not enabled) while the key still
+   * serves every other model.
+   */
+  requestErrorStatuses?: readonly number[];
 }
 
 function waitForRetry(ms: number, signal: AbortSignal): Promise<boolean> {
@@ -213,7 +220,7 @@ export async function proxyWithRetry(
         lastStatus = 429;
         lastRetryAfter = null;
         lastErrBody = ambiguous429RejectionBody(ambiguousAccounts.length);
-          tagStatsFailure(resp, "request_rejected", manager.provider);
+        tagStatsFailure(resp, "request_rejected", manager.provider);
         break;
       }
       manager.recordAttempt(account.token.email);
@@ -284,13 +291,16 @@ export async function proxyWithRetry(
       }
 
       lastStatus = upstream.status;
+      const requestError = !!options.requestErrorStatuses?.includes(lastStatus);
       tagStatsFailure(
         resp,
-        lastStatus >= 400 && lastStatus < 500
-          ? lastStatus === 401 || lastStatus === 403 || lastStatus === 429
-            ? classifyFailure(lastStatus)
-            : "client_error"
-          : classifyFailure(lastStatus),
+        requestError
+          ? "client_error"
+          : lastStatus >= 400 && lastStatus < 500
+            ? lastStatus === 401 || lastStatus === 403 || lastStatus === 429
+              ? classifyFailure(lastStatus)
+              : "client_error"
+            : classifyFailure(lastStatus),
         manager.provider,
       );
       lastRetryAfter = upstream.headers.get("retry-after");
@@ -340,6 +350,8 @@ export async function proxyWithRetry(
             continue;
           }
         }
+      } else if (requestError) {
+        break;
       } else if (
         lastStatus === 403 ||
         lastStatus === 429 ||
