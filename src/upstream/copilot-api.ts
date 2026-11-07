@@ -82,6 +82,49 @@ export async function callCopilotChatCompletions(
   }
 }
 
+const EMBEDDINGS_PATH = "/embeddings";
+
+/** Copilot's embedding models (OpenAI `text-embedding-*`), bare or `copilot-`/`ghcp/` prefixed. */
+export function isCopilotEmbeddingModel(model: string): boolean {
+  return /^text-embedding-/i.test(stripModelPrefix(model));
+}
+
+/**
+ * Copilot answers a plain-text "400 Bad Request" when `input` is a single
+ * string (seen live on 2026-11-07), which OpenAI accepts: it is sent as a
+ * one-item list, same tokens and same `data[0]` in the answer.
+ */
+export function normalizeCopilotEmbeddingsBody(body: any): any {
+  const next = normalizeChatBody(body);
+  if (next && typeof next.input === "string") return { ...next, input: [next.input] };
+  return next;
+}
+
+/** POST /embeddings, body relayed as is (`copilot-` prefix removed, string input listed). */
+export async function callCopilotEmbeddings(options: {
+  body: any;
+  account: AvailableAccount;
+  config: Config;
+  signal?: AbortSignal;
+}): Promise<Response> {
+  const { account, config } = options;
+  const body = normalizeCopilotEmbeddingsBody(options.body);
+  try {
+    return await fetch(`${BASE_URL}${EMBEDDINGS_PATH}`, {
+      method: "POST",
+      headers: buildHeaders(account, false),
+      body: JSON.stringify(body),
+      signal: withTimeoutSignal(config.timeouts["messages-ms"], options.signal),
+    });
+  } catch (err: any) {
+    const cause = err?.cause;
+    const detail = cause
+      ? `${cause.code || cause.name || "error"}: ${cause.message || String(cause)}`
+      : err?.message || String(err);
+    throw new Error(`copilot upstream fetch failed: ${detail}`);
+  }
+}
+
 export async function listCopilotModels(
   manager: AccountManager,
 ): Promise<Array<{ id: string; owned_by: string }>> {

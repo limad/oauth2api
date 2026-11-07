@@ -15,6 +15,11 @@ import {
   stripMistralPrefix,
 } from "../upstream/mistral-api";
 import { openaiErrorBody } from "./openai";
+import {
+  callCopilotEmbeddings,
+  isCopilotEmbeddingModel,
+} from "../upstream/copilot-api";
+import { stripCopilotPrefix } from "../providers/copilot";
 
 const EXAMPLE_MODEL: Record<MistralExtraKind, string> = {
   fim: "codestral-latest",
@@ -38,10 +43,11 @@ function badRequest(resp: ExpressResponse, message: string): void {
 }
 
 /**
- * Mistral-only routes (FIM, embeddings, OCR, audio transcription), relayed as
- * is with the Vibe key: the body goes upstream untouched (only a `mistral/`
- * model prefix is removed), the answer comes back untouched. No other provider
- * serves them, so a non-Mistral model is refused here without any upstream call.
+ * Routes outside chat (FIM, embeddings, OCR, audio transcription), relayed as
+ * is: the body goes upstream untouched (only a `mistral/` or `copilot-` model
+ * prefix is removed), the answer comes back untouched. Mistral (Vibe key)
+ * serves all four; Copilot also serves embeddings (`text-embedding-*`). Any
+ * other model is refused here without any upstream call.
  */
 export function createMistralExtraHandler(
   kind: MistralExtraKind,
@@ -51,7 +57,7 @@ export function createMistralExtraHandler(
   const path = MISTRAL_EXTRA_PATHS[kind];
   return async (req: Request, resp: ExpressResponse): Promise<void> => {
     try {
-      const provider = registry.get("mistral");
+      let provider = registry.get("mistral");
       let body: any;
       let model: string;
       let stream = false;
@@ -74,7 +80,13 @@ export function createMistralExtraHandler(
         }
         model = typeof req.body.model === "string" ? req.body.model.trim() : "";
         stream = kind === "fim" && !!req.body.stream;
-        const bare = stripMistralPrefix(model);
+        if (kind === "embeddings" && isCopilotEmbeddingModel(model)) {
+          provider = registry.get("copilot");
+        }
+        const bare =
+          provider.id === "copilot"
+            ? stripCopilotPrefix(model)
+            : stripMistralPrefix(model);
         body = bare !== model ? { ...req.body, model: bare } : req.body;
       }
 
@@ -82,22 +94,26 @@ export function createMistralExtraHandler(
         badRequest(resp, `model is required (e.g. ${EXAMPLE_MODEL[kind]})`);
         return;
       }
-      if (!provider.matchesModel(model)) {
+      if (provider.id === "mistral" && !provider.matchesModel(model)) {
         badRequest(
           resp,
-          `${path} is only served by Mistral: use a Mistral model (e.g. ${EXAMPLE_MODEL[kind]}) or prefix it with mistral/`,
+          kind === "embeddings"
+            ? `${path}: use a Mistral model (e.g. mistral-embed, or mistral/<id>) or a Copilot one (e.g. text-embedding-3-small)`
+            : `${path} is only served by Mistral: use a Mistral model (e.g. ${EXAMPLE_MODEL[kind]}) or prefix it with mistral/`,
         );
         return;
       }
       tagStatsModel(resp, model, provider.id);
       const affinity = clientAffinity(req);
 
-      await proxyWithRetry(`${kind}(mistral)`, resp, config, {
+      await proxyWithRetry(`${kind}(${provider.id})`, resp, config, {
         manager: provider.manager,
         requestErrorStatuses: provider.requestErrorStatuses,
         profile: req.header("x-auth2api-profile") || undefined,
         upstream: (account, signal) =>
-          callMistralExtra({
+          provider.id === "copilot"
+            ? callCopilotEmbeddings({ body, account, config, signal })
+            : callMistralExtra({
             kind,
             body,
             contentType,
@@ -148,7 +164,7 @@ export function createMistralExtraHandler(
         errorAdapter: openaiErrorBody,
       });
     } catch (err: any) {
-      console.error(`${kind}(mistral) handler error:`, err?.message || err);
+      console.error(`${kind} handler error:`, err?.message || err);
       if (!resp.headersSent) {
         resp.status(500).json({ error: { message: "Internal server error" } });
       } else if (!resp.writableEnded) {

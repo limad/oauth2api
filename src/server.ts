@@ -1,5 +1,5 @@
 import { modelAliasMiddleware } from "./utils/model-echo";
-import { createMistralExtraHandler } from "./handlers/mistral-extra";
+import { createMistralExtraHandler } from "./handlers/extra-endpoints";
 import express from "express";
 import net from "net";
 import { Config, isDebugLevel } from "./config";
