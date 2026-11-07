@@ -13,6 +13,7 @@ import {
   replaceMultipartField,
 } from "../src/upstream/mistral-api";
 import { MISTRAL_NO_REFRESH } from "../src/auth/mistral/vibe-login";
+import { normalizeCopilotEmbeddingsBody } from "../src/upstream/copilot-api";
 
 interface Seen {
   url: string;
@@ -34,8 +35,17 @@ async function withServer(
     accountUuid: "u",
     provider: "mistral",
   });
+  saveToken(dir, {
+    accessToken: "copilot-test-token",
+    refreshToken: "copilot-test-token",
+    email: "gh-user",
+    expiresAt: "2036-01-01T00:00:00.000Z",
+    accountUuid: "gh",
+    provider: "copilot",
+  });
   const registry = buildRegistry(dir);
   registry.get("mistral").manager.load();
+  registry.get("copilot").manager.load();
   const recorder = new StatsRecorder();
   recorder.start(dir);
   const app = createServer(
@@ -57,7 +67,8 @@ async function withServer(
   const orig = globalThis.fetch;
   globalThis.fetch = (async (input: any, init?: any) => {
     const url = String(input?.url ?? input);
-    if (!url.startsWith("https://api.mistral.ai/")) return orig(input, init);
+    if (!url.startsWith("https://api.mistral.ai/") && !url.startsWith("https://api.githubcopilot.com/"))
+      return orig(input, init);
     const s: Seen = {
       url,
       headers: Object.fromEntries(
@@ -132,13 +143,13 @@ test("embeddings: prefix removed, body otherwise untouched, answer relayed, affi
 test("non-Mistral model or missing model: 400 without any upstream call", async () => {
   await withServer(() => json({}), async (base, seen) => {
     for (const [p, body] of [
-      ["/v1/embeddings", { model: "text-embedding-3-small", input: "a" }],
+      ["/v1/embeddings", { model: "nomic-embed-text", input: "a" }],
       ["/v1/fim/completions", { prompt: "x" }],
       ["/v1/ocr", []],
     ] as const) {
       const r = await fetch(`${base}${p}`, { method: "POST", headers: AUTH, body: JSON.stringify(body) });
       assert.equal(r.status, 400, p);
-      assert.match((await r.json()).error.message, /Mistral|model|JSON/);
+      assert.match((await r.json()).error.message, /Mistral|Copilot|model|JSON/);
     }
     const r = await fetch(`${base}/v1/audio/transcriptions`, { method: "POST", headers: AUTH, body: "{}" });
     assert.equal(r.status, 400);
@@ -223,4 +234,43 @@ test("chat: x-affinity forwarded, invalid value dropped", async () => {
     assert.equal(seen[1].headers["x-affinity"], undefined);
     assert.equal(seen[2].headers["x-affinity"], undefined);
   });
+});
+
+test("embeddings: text-embedding-* goes to Copilot, prefix removed, body untouched, no affinity", async () => {
+  const upstream = { object: "list", data: [{ object: "embedding", embedding: [0.1], index: 0 }], model: "text-embedding-3-small", usage: { prompt_tokens: 3, total_tokens: 3 } };
+  await withServer(() => json(upstream), async (base, seen) => {
+    for (const model of ["text-embedding-3-small", "copilot-text-embedding-3-small"]) {
+      const r = await fetch(`${base}/v1/embeddings`, {
+        method: "POST",
+        headers: { ...AUTH, "x-affinity": "s1" },
+        body: JSON.stringify({ model, input: ["a"], encoding_format: "float", dimensions: 512 }),
+      });
+      assert.equal(r.status, 200);
+      assert.deepEqual(await r.json(), upstream);
+    }
+    assert.equal(seen.length, 2);
+    for (const s of seen) {
+      assert.equal(s.url, "https://api.githubcopilot.com/embeddings");
+      assert.equal(s.headers.authorization, "Bearer copilot-test-token");
+      assert.equal(s.headers["x-affinity"], undefined);
+      assert.deepEqual(JSON.parse(s.body.toString()), { model: "text-embedding-3-small", input: ["a"], encoding_format: "float", dimensions: 512 });
+    }
+  });
+});
+
+test("embeddings: mistral-embed still goes to Mistral; Copilot models only on /v1/embeddings", async () => {
+  await withServer(() => json({ data: [], usage: { prompt_tokens: 1, total_tokens: 1 } }), async (base, seen) => {
+    const a = await fetch(`${base}/v1/embeddings`, { method: "POST", headers: AUTH, body: JSON.stringify({ model: "mistral-embed", input: "a" }) });
+    assert.equal(a.status, 200);
+    const b = await fetch(`${base}/v1/ocr`, { method: "POST", headers: AUTH, body: JSON.stringify({ model: "text-embedding-3-small", document: {} }) });
+    assert.equal(b.status, 400);
+    assert.deepEqual(seen.map((s) => s.url), ["https://api.mistral.ai/v1/embeddings"]);
+  });
+});
+
+test("Copilot embeddings: a string input is sent as a one-item list, nothing else changes", () => {
+  assert.deepEqual(normalizeCopilotEmbeddingsBody({ model: "copilot-text-embedding-3-small", input: "a" }), { model: "text-embedding-3-small", input: ["a"] });
+  const list = { model: "text-embedding-3-small", input: ["a", "b"], dimensions: 256 };
+  assert.deepEqual(normalizeCopilotEmbeddingsBody(list), list);
+  assert.deepEqual(normalizeCopilotEmbeddingsBody({ model: "text-embedding-3-small", input: [1, 2] }), { model: "text-embedding-3-small", input: [1, 2] });
 });
