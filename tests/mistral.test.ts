@@ -418,3 +418,37 @@ test("account from key: e-mail and plan read, rejected key is an error", async (
   const bad = fakeFetch(() => ({ status: 401, body: {} }));
   await assert.rejects(mistralTokenFromKey("sk", bad.impl), /rejected/);
 });
+
+test("Vibe sign-in: 429 on poll backs off and keeps polling, 429 on start is explicit", async () => {
+  const waits: number[] = [];
+  let polls = 0;
+  const { impl } = fakeFetch((c) => {
+    if (c.url.endsWith("/vibe/sign-in") && c.method === "POST")
+      return { status: 200, body: START };
+    if (c.url === START.poll_url) {
+      polls++;
+      if (polls <= 5) return { status: 429, body: {} };
+      return {
+        status: 200,
+        body: { status: "completed", exchange_token: "ex" },
+      };
+    }
+    if (c.url.endsWith("/exchange"))
+      return { status: 200, body: { api_key: "sk-ok" } };
+    return { status: 404, body: {} };
+  });
+  const key = await runVibeBrowserLogin({
+    fetchImpl: impl,
+    sleep: async (ms) => {
+      waits.push(ms);
+    },
+  });
+  assert.equal(key, "sk-ok");
+  assert.deepEqual(waits, [6000, 12000, 24000, 30000, 30000]);
+
+  const limited = fakeFetch(() => ({ status: 429, body: {} }));
+  await assert.rejects(
+    runVibeBrowserLogin({ fetchImpl: limited.impl, sleep: async () => {} }),
+    /retry in a few minutes/,
+  );
+});

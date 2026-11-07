@@ -33,6 +33,14 @@ const KEY_LIFETIME_MS = 3650 * 86_400_000;
 
 const POLL_INTERVAL_MS = 3000;
 const MAX_CONSECUTIVE_POLL_FAILURES = 3;
+/**
+ * console.mistral.ai rate-limits /api/vibe/sign-in* (429 with `retry-after: 0`,
+ * seen live on 2026-11-07 after ~5 min of polling every 3 s). A 429 is not a
+ * failure of the sign-in: wait longer (doubling, capped) and keep polling until
+ * the process expires.
+ */
+const RATE_LIMIT_MAX_WAIT_MS = 30_000;
+const EXCHANGE_MAX_ATTEMPTS = 3;
 const WORKSPACE_NOT_ELIGIBLE_CODE = 9004;
 
 export interface VibeLoginOptions {
@@ -105,6 +113,21 @@ function headers(extra?: Record<string, string>): Record<string, string> {
   };
 }
 
+/** Next wait after a 429: Retry-After when given (> 0), else doubling from 2x the poll interval. */
+export function rateLimitWait(
+  resp: Response,
+  previousMs: number,
+  intervalMs: number,
+): number {
+  const ra = Number(resp.headers.get("retry-after"));
+  if (Number.isFinite(ra) && ra > 0)
+    return Math.min(ra * 1000, RATE_LIMIT_MAX_WAIT_MS);
+  return Math.min(
+    Math.max(previousMs * 2, intervalMs * 2),
+    RATE_LIMIT_MAX_WAIT_MS,
+  );
+}
+
 async function readJson(resp: Response): Promise<any> {
   try {
     return await resp.json();
@@ -132,6 +155,11 @@ export async function runVibeBrowserLogin(
     }),
     signal: opts.signal,
   });
+  if (startResp.status === 429) {
+    throw new Error(
+      "Mistral limits sign-in attempts (HTTP 429): retry in a few minutes",
+    );
+  }
   if (!startResp.ok) {
     throw new Error(`Mistral sign-in start failed (HTTP ${startResp.status})`);
   }
@@ -163,6 +191,7 @@ export async function runVibeBrowserLogin(
 
   let exchangeToken = "";
   let failures = 0;
+  let backoff = 0;
   while (now() < deadline) {
     if (opts.signal?.aborted) throw new Error("Mistral sign-in aborted");
     let resp: Response;
@@ -179,6 +208,11 @@ export async function runVibeBrowserLogin(
       continue;
     }
     if (resp.status === 410) throw new Error("Mistral sign-in expired");
+    if (resp.status === 429) {
+      backoff = rateLimitWait(resp, backoff, interval);
+      await sleep(backoff);
+      continue;
+    }
     if (!resp.ok) {
       if (++failures >= MAX_CONSECUTIVE_POLL_FAILURES) {
         throw new Error(`Mistral sign-in poll failed (HTTP ${resp.status})`);
@@ -187,6 +221,7 @@ export async function runVibeBrowserLogin(
       continue;
     }
     failures = 0;
+    backoff = 0;
     const data = await readJson(resp);
     const status = data?.status;
     if (status === "pending") {
@@ -211,18 +246,26 @@ export async function runVibeBrowserLogin(
   }
   if (!exchangeToken) throw new Error("Mistral sign-in timed out");
 
-  const exResp = await doFetch(
-    `${MISTRAL_SIGN_IN_API}/vibe/sign-in/${encodeURIComponent(proc.process_id)}/exchange`,
-    {
-      method: "POST",
-      headers: headers({ "Content-Type": "application/json" }),
-      body: JSON.stringify({
-        exchange_token: exchangeToken,
-        code_verifier: verifier,
-      }),
-      signal: opts.signal,
-    },
-  );
+  // A 429 means the exchange was not processed: retrying it is safe.
+  let exResp: Response;
+  let exWait = 0;
+  for (let attempt = 1; ; attempt++) {
+    exResp = await doFetch(
+      `${MISTRAL_SIGN_IN_API}/vibe/sign-in/${encodeURIComponent(proc.process_id)}/exchange`,
+      {
+        method: "POST",
+        headers: headers({ "Content-Type": "application/json" }),
+        body: JSON.stringify({
+          exchange_token: exchangeToken,
+          code_verifier: verifier,
+        }),
+        signal: opts.signal,
+      },
+    );
+    if (exResp.status !== 429 || attempt >= EXCHANGE_MAX_ATTEMPTS) break;
+    exWait = rateLimitWait(exResp, exWait, interval);
+    await sleep(exWait);
+  }
   if (!exResp.ok) {
     const body = await readJson(exResp);
     if (
