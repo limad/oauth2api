@@ -56,9 +56,21 @@ export interface UsageData {
 
 /**
  * Extract usage from a non-streamed JSON response. Handles both Anthropic
- * Messages shape (input_tokens / cache_creation_input_tokens / …) and OpenAI
- * Responses shape (input_tokens_details.cached_tokens / …).
+ * Messages shape (input_tokens / cache_creation_input_tokens / …), OpenAI
+ * Responses shape (input_tokens_details.cached_tokens / …) and OpenAI Chat
+ * Completions shape (prompt_tokens / prompt_tokens_details.cached_tokens / …).
  */
+/** OpenAI Chat Completions `usage` (Copilot, Mistral). prompt_tokens includes cached ones. */
+export function chatCompletionsUsage(u: any): UsageData {
+  return {
+    inputTokens: u?.prompt_tokens || 0,
+    outputTokens: u?.completion_tokens || 0,
+    cacheCreationInputTokens: 0,
+    cacheReadInputTokens: u?.prompt_tokens_details?.cached_tokens || 0,
+    reasoningOutputTokens: u?.completion_tokens_details?.reasoning_tokens || 0,
+  };
+}
+
 export function extractUsage(resp: any): UsageData {
   const u = resp?.usage ?? resp?.response?.usage;
   if (!u) {
@@ -69,6 +81,9 @@ export function extractUsage(resp: any): UsageData {
       cacheReadInputTokens: 0,
       reasoningOutputTokens: 0,
     };
+  }
+  if (u.input_tokens === undefined && u.prompt_tokens !== undefined) {
+    return chatCompletionsUsage(u);
   }
   return {
     inputTokens: u.input_tokens || 0,

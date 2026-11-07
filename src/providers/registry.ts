@@ -5,6 +5,7 @@ import { buildCodexProvider } from "./codex";
 import { buildCursorProvider } from "./cursor";
 import { buildCopilotProvider } from "./copilot";
 import { buildGeminiProvider } from "./gemini";
+import { buildMistralProvider } from "./mistral";
 import { Provider } from "./types";
 
 export interface ProviderRegistry {
@@ -22,14 +23,16 @@ export function buildRegistry(authDir: string): ProviderRegistry {
   const cursor = buildCursorProvider(authDir);
   const copilot = buildCopilotProvider(authDir);
   const gemini = buildGeminiProvider(authDir);
+  const mistral = buildMistralProvider(authDir);
   const byId: Record<ProviderId, Provider> = {
     anthropic,
     codex,
     cursor,
     copilot,
     gemini,
+    mistral,
   };
-  const ordered: Provider[] = [anthropic, codex, cursor, copilot, gemini];
+  const ordered: Provider[] = [anthropic, codex, cursor, copilot, gemini, mistral];
 
   return {
     get: (id) => {
@@ -46,6 +49,7 @@ export function buildRegistry(authDir: string): ProviderRegistry {
       if (cursor.matchesModel(resolved)) return cursor;
       if (copilot.matchesModel(resolved)) return copilot;
       if (gemini.matchesModel(resolved)) return gemini;
+      if (mistral.matchesModel(resolved)) return mistral;
 
       // "Cursor exclusive" mode: when only Cursor has accounts, route every
       // unknown / Anthropic-style / OpenAI-style model through Cursor. This
@@ -56,7 +60,8 @@ export function buildRegistry(authDir: string): ProviderRegistry {
         anthropic.manager.accountCount === 0 &&
         codex.manager.accountCount === 0 &&
         copilot.manager.accountCount === 0 &&
-        gemini.manager.accountCount === 0;
+        gemini.manager.accountCount === 0 &&
+        mistral.manager.accountCount === 0;
       if (cursorOnly) return cursor;
 
       // Multi-provider setups: fall back to the explicit family routes.

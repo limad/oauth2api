@@ -6,6 +6,7 @@ import { generatePKCECodes } from "./auth/pkce";
 import { waitForCallback } from "./auth/callback-server";
 import { importCursorTokenFromLocalStorage } from "./auth/cursor/storage";
 import { runCursorBrowserLogin } from "./auth/cursor/browser-oauth";
+import { runVibeBrowserLogin, mistralTokenFromKey } from "./auth/mistral/vibe-login";
 import { buildRegistry, ProviderRegistry } from "./providers/registry";
 import { createServer } from "./server";
 import { notifyServerReload } from "./utils/notify-reload";
@@ -32,11 +33,12 @@ function parseProviderArg(args: string[]): ProviderId {
     value === "anthropic" ||
     value === "codex" ||
     value === "cursor" ||
-    value === "gemini"
+    value === "gemini" ||
+    value === "mistral"
   )
     return value;
   throw new Error(
-    `Unknown provider "${value}". Supported: anthropic, codex, cursor, gemini`,
+    `Unknown provider "${value}". Supported: anthropic, codex, cursor, gemini, mistral`,
   );
 }
 
@@ -80,6 +82,32 @@ async function browserCursorLogin(
   console.log(
     "Note: Cursor provider support is experimental and uses non-public APIs.",
   );
+  await notifyServerReload(config);
+}
+
+/**
+ * Mistral Vibe sign-in: the browser approval is exchanged for a long-lived
+ * Mistral API key (no refresh token). Same "poll" contract as Cursor for
+ * ai_proxy: "Logging in to" + "Open this URL" lines, exit code = result.
+ */
+async function vibeMistralLogin(
+  config: Config,
+  registry: ProviderRegistry,
+): Promise<void> {
+  const provider = registry.get("mistral");
+  console.log("\nLogging in to mistral (Vibe browser sign-in).");
+  const apiKey = await runVibeBrowserLogin({
+    onLoginUrl: (url) => {
+      console.log("Open this URL in your browser to login:\n");
+      console.log(url);
+      console.log("\nSign in to Mistral and approve Vibe — oauth2api picks up the key automatically.\n");
+    },
+  });
+  const tokenData = await mistralTokenFromKey(apiKey);
+  provider.manager.addAccount(tokenData);
+  console.log("Mistral Vibe login complete.");
+  console.log(`Account: ${tokenData.email}`);
+  if (tokenData.planType) console.log(`Plan: ${tokenData.planType}`);
   await notifyServerReload(config);
 }
 
@@ -249,6 +277,8 @@ async function main(): Promise<void> {
       } else {
         await browserCursorLogin(config, registry);
       }
+    } else if (providerId === "mistral") {
+      await vibeMistralLogin(config, registry);
     } else {
       await doLogin(config, registry, providerId, manual);
     }

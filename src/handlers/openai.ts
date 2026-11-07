@@ -520,8 +520,10 @@ export function createChatCompletionsHandler(
       // Cursor's chat upstream is also stream-only, so for non-streaming
       // requests we let the provider stream internally and aggregate the
       // pieces here before responding with a single chat.completion JSON.
-      if (provider.id === "copilot") {
-        await proxyWithRetry("ChatCompletions(copilot)", resp, config, {
+      // Copilot and Mistral speak Chat Completions natively: pass-through
+      // (each provider only renames/drops what its API rejects).
+      if (provider.nativeFormat === "openai-chat") {
+        await proxyWithRetry(`ChatCompletions(${provider.id})`, resp, config, {
           manager: provider.manager,
           accountFilter: provider.accountFilter?.(model),
           profile: req.header("x-auth2api-profile") || undefined,
@@ -547,7 +549,9 @@ export function createChatCompletionsHandler(
               }
             } else {
               const data = await upstream.json();
-              provider.manager.recordSuccess(account.token.email, extractUsage(data));
+              const usage = extractUsage(data);
+              provider.manager.recordSuccess(account.token.email, usage);
+              tagStatsUsage(resp, usage);
               resp.json(data);
             }
           },
@@ -676,6 +680,17 @@ export function createResponsesHandler(
       // intent decides whether we forward SSE or aggregate locally.
       const clientWantsStream = !!body.stream;
 
+      if (provider.nativeFormat === "openai-chat") {
+        resp.status(400).json({
+          error: {
+            message: `This model is served by the ${provider.id} provider, which supports /v1/chat/completions only.`,
+            type: "unsupported_endpoint_for_provider",
+            provider: provider.id,
+          },
+        });
+        return;
+      }
+
       if (provider.nativeFormat === "openai-responses") {
         if (provider.id === "codex") {
           await proxyCodexResponses({
@@ -686,17 +701,6 @@ export function createResponsesHandler(
             body,
             model,
             stream: clientWantsStream,
-          });
-          return;
-        }
-
-        if (provider.id === "copilot") {
-          resp.status(400).json({
-            error: {
-              message: "Copilot provider currently supports /v1/chat/completions only.",
-              type: "unsupported_endpoint_for_provider",
-              provider: provider.id,
-            },
           });
           return;
         }
