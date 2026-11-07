@@ -403,6 +403,7 @@ test("isAmbiguousGoogle429 detects bare Google 429 without details", () => {
 
 test("proxyWithRetry does not cool down accounts when two accounts return bare Google 429", async () => {
   const resp = makeMockResponse();
+  resp.locals.stats = {};
   const accounts = [
     { token: { email: "first@g.com" } },
     { token: { email: "second@g.com" } },
@@ -439,6 +440,7 @@ test("proxyWithRetry does not cool down accounts when two accounts return bare G
   assert.deepEqual(failures, []);
   assert.equal(resp.statusCode, 429);
   assert.equal(resp.body?.error?.type, "upstream_request_rejected");
+  assert.equal(resp.locals.stats.failureKind, "request_rejected");
   assert.match(String(resp.body?.error?.message), /sur 2 comptes/);
 });
 
@@ -488,6 +490,7 @@ test("proxyWithRetry records rate_limit on first account when second account suc
 
 test("proxyWithRetry does not loop or cool down when only one account is available on bare Google 429", async () => {
   const resp = makeMockResponse();
+  resp.locals.stats = {};
   const soloAccount: any = { token: { email: "solo@g.com" } };
   const failures: Array<{ email: string; kind: string }> = [];
   let upstreamCalls = 0;
@@ -518,10 +521,12 @@ test("proxyWithRetry does not loop or cool down when only one account is availab
   assert.deepEqual(failures, []);
   assert.equal(resp.statusCode, 429);
   assert.equal(resp.body?.error?.type, "upstream_request_rejected");
+  assert.equal(resp.locals.stats.failureKind, "request_rejected");
 });
 
 test("proxyWithRetry does not fall back to an account outside the model filter after bare Google 429", async () => {
   const resp = makeMockResponse();
+  resp.locals.stats = {};
   const accounts = [
     { token: { email: "pro@g.com" } },
     { token: { email: "free@g.com" } },
@@ -559,6 +564,7 @@ test("proxyWithRetry does not fall back to an account outside the model filter a
   assert.deepEqual(failures, []);
   assert.equal(resp.statusCode, 429);
   assert.equal(resp.body?.error?.type, "upstream_request_rejected");
+  assert.equal(resp.locals.stats.failureKind, "request_rejected");
 });
 
 // ══════════════════════════════════════════════════

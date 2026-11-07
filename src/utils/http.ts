@@ -192,6 +192,7 @@ export async function proxyWithRetry(
           lastStatus = 429;
           lastRetryAfter = null;
           lastErrBody = ambiguous429RejectionBody(ambiguousAccounts.length);
+          tagStatsFailure(resp, "request_rejected", manager.provider);
           break;
         }
         return accountUnavailable(resp, result, manager.provider);
@@ -212,6 +213,7 @@ export async function proxyWithRetry(
         lastStatus = 429;
         lastRetryAfter = null;
         lastErrBody = ambiguous429RejectionBody(ambiguousAccounts.length);
+          tagStatsFailure(resp, "request_rejected", manager.provider);
         break;
       }
       manager.recordAttempt(account.token.email);
@@ -315,6 +317,7 @@ export async function proxyWithRetry(
           }
           lastRetryAfter = null;
           lastErrBody = ambiguous429RejectionBody(ambiguousAccounts.length);
+          tagStatsFailure(resp, "request_rejected", manager.provider);
           break;
         }
         if (isDebugLevel(config.debug, "errors")) {
