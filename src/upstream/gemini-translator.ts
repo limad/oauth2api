@@ -307,7 +307,8 @@ export function anthropicToGeminiContents(body: any): {
   }
 
   const contents: any[] = [];
-  for (const msg of messages) {
+  const lastIndex = messages.length - 1;
+  for (const [i, msg] of messages.entries()) {
     const role = msg.role === "assistant" ? "model" : "user";
     const dropped: string[] = [];
     const parts = anthropicContentToParts(
@@ -316,8 +317,14 @@ export function anthropicToGeminiContents(body: any): {
       toolIdToName,
       dropped,
     );
+    // A part lost in the user turn being sent would cost a call for an
+    // answer about missing content (e.g. OpenAI `input_audio`), so refuse it.
+    // Older turns stay tolerant so one old url image doesn't block a thread.
+    const isCurrentUserTurn = i === lastIndex && msg.role === "user";
+    if (dropped.length && (isCurrentUserTurn || !parts.length)) {
+      throw new UnsupportedContentError(dropped[0]);
+    }
     if (parts.length) contents.push({ role, parts });
-    else if (dropped.length) throw new UnsupportedContentError(dropped[0]);
   }
 
   let systemInstruction: any;

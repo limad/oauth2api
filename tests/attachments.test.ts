@@ -86,7 +86,27 @@ test("gemini: url-only image turn is refused", () => {
   );
 });
 
-test("gemini: text beside an unsupported part still travels", () => {
+test("gemini: unsupported part beside text in the current turn is refused", () => {
+  // OpenAI input_audio reaches the Gemini translator untouched; dropping it
+  // silently made Gemini answer "you forgot the audio" and spent a call.
+  assert.throws(
+    () =>
+      anthropicToGeminiContents({
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "transcribe" },
+              { type: "input_audio", input_audio: { data: "UklGRg==", format: "wav" } },
+            ],
+          },
+        ],
+      }),
+    (e: any) => e instanceof UnsupportedContentError && /input_audio/.test(e.message),
+  );
+});
+
+test("gemini: text beside an unsupported part in an older turn still travels", () => {
   const r = anthropicToGeminiContents({
     messages: [
       {
@@ -96,6 +116,8 @@ test("gemini: text beside an unsupported part still travels", () => {
           { type: "image", source: { type: "url", url: "https://x/y.png" } },
         ],
       },
+      { role: "assistant", content: "hello" },
+      { role: "user", content: "next" },
     ],
   });
   assert.deepEqual(r.contents[0].parts, [{ text: "hi" }]);
@@ -109,4 +131,24 @@ test("gemini: thinking-only assistant turn is skipped, not refused", () => {
     ],
   });
   assert.equal(r.contents.length, 1);
+});
+
+test("gemini: base64 audio (document block or data: URI image) travels as inlineData", () => {
+  // The only audio paths that reach Gemini today (checked live on 2026-11-07).
+  const r = anthropicToGeminiContents({
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "transcribe" },
+          { type: "document", source: { type: "base64", media_type: "audio/webm", data: "GkXf" } },
+          { type: "image", source: { type: "base64", media_type: "audio/wav", data: "UklGRg==" } },
+        ],
+      },
+    ],
+  });
+  assert.deepEqual(r.contents[0].parts.slice(1), [
+    { inlineData: { mimeType: "audio/webm", data: "GkXf" } },
+    { inlineData: { mimeType: "audio/wav", data: "UklGRg==" } },
+  ]);
 });
