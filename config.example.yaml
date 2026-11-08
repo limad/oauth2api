@@ -47,13 +47,15 @@ cloaking:
   # NOT identity faking; these mirror what the official codex CLI sends.
   # The cli-version drives BOTH the User-Agent suffix and the explicit
   # `version` HTTP header — the backend version-gates some models on it
-  # ("requires a newer version of Codex" 400). Bump if you see that error;
-  # `npm view @openai/codex version` shows the current released version.
+  # ("requires a newer version of Codex" 400, or "model is not supported when
+  # using Codex with a ChatGPT account" when a model's minimal_client_version
+  # is higher). Leave cli-version unset to follow the runtime default, which is
+  # bumped with each release; set it only to override that default.
   codex:
     # Full User-Agent string, takes precedence over the components below.
-    # user-agent: "codex_cli_rs/0.125.0 (macos; arm64)"
+    # user-agent: "codex_cli_rs/0.163.0 (linux; x86_64)"
     originator: "codex_cli_rs"
-    cli-version: "0.125.0"
+    # cli-version: "0.163.0"
     # Set only if the upstream begins requiring an OpenAI-Beta header.
     # openai-beta: "responses=experimental"
 
