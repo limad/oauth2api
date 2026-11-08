@@ -14,6 +14,7 @@ import {
   anthropicToResponses,
   makeResponsesState,
   anthropicSSEToResponses,
+  normalizeResponsesInput,
 } from "../upstream/translator";
 import { handleStreamingResponse, readSseEvents } from "../upstream/streaming";
 import {
@@ -686,7 +687,7 @@ export function createResponsesHandler(
 ) {
   return async (req: Request, resp: ExpressResponse): Promise<void> => {
     try {
-      const body = req.body;
+      const body = normalizeResponsesInput(req.body);
       if (!body.input && !body.messages) {
         resp.status(400).json({ error: { message: "input is required" } });
         return;
