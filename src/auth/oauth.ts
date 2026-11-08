@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import { PKCECodes, TokenData } from "./types";
 import { timeout } from "../utils/common";
 import {
@@ -9,7 +10,16 @@ const AUTH_URL = "https://claude.ai/oauth/authorize";
 const TOKEN_URL = "https://api.anthropic.com/v1/oauth/token";
 const CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const REDIRECT_URI = "http://localhost:54545/callback";
-const SCOPE = "org:create_api_key user:profile user:inference";
+// Same scopes as a native Claude Code login (refresh sends no scope).
+const SCOPE =
+  "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
+
+// claude.ai rejects an authorize URL whose state is shorter than Claude Code's
+// (base64url of 32 random bytes, 43 chars) with "Invalid request format"
+// since early November 2026. Same fix as CLIProxyAPI #7317.
+export function generateClaudeState(): string {
+  return crypto.randomBytes(32).toString("base64url");
+}
 
 export function generateAuthURL(state: string, pkce: PKCECodes): string {
   // Use URLSearchParams for standard params, but handle scope separately

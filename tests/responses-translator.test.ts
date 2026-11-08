@@ -824,3 +824,34 @@ test("responsesSSEToAnthropic repeats final usage in message_delta", () => {
     output_tokens: 44,
   });
 });
+
+test("drainCodexResponsesSse: a bare error event after partial text is an upstream error", async () => {
+  const resp = makeStreamingResponse([
+    'event: response.output_text.delta\ndata: {"delta":"par"}\n\n',
+    'event: error\ndata: {"type":"error","message":"overloaded"}\n\n',
+  ]);
+  const drained = await drainCodexResponsesSse(resp);
+  assert.equal(drained.textOut, "par");
+  assert.equal(drained.upstreamError, "overloaded");
+});
+
+test("drainCodexResponsesSse: a stream cut before its final event is an upstream error", async () => {
+  const resp = makeStreamingResponse([
+    'event: response.output_text.delta\ndata: {"delta":"half"}\n\n',
+  ]);
+  const drained = await drainCodexResponsesSse(resp);
+  assert.equal(drained.completedResponse, null);
+  assert.match(drained.upstreamError || "", /ended before/);
+});
+
+test("drainCodexResponsesSse: response.incomplete ends normally with its status", async () => {
+  const incomplete = { id: "resp_i", status: "incomplete", output: [], usage: { input_tokens: 2, output_tokens: 9 } };
+  const resp = makeStreamingResponse([
+    'event: response.output_text.delta\ndata: {"delta":"long"}\n\n',
+    `event: response.incomplete\ndata: ${JSON.stringify({ response: incomplete })}\n\n`,
+  ]);
+  const drained = await drainCodexResponsesSse(resp);
+  assert.equal(drained.upstreamError, null);
+  assert.equal(drained.status, "incomplete");
+  assert.deepEqual(drained.usage, { input_tokens: 2, output_tokens: 9 });
+});

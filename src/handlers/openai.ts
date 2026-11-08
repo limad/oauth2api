@@ -148,7 +148,9 @@ async function proxyCodexChatCompletions(args: {
       const { textOut, reasoningOut, toolCalls, upstreamError, status, usage } =
         drained;
 
-      if (upstreamError && !textOut && !reasoningOut && toolCalls.size === 0) {
+      // Partial output followed by an error is a truncated answer: fail it
+      // rather than return it as complete.
+      if (upstreamError) {
         if (!resp.headersSent) {
           resp.status(502).json({
             error: { message: upstreamError, type: "upstream_error" },
