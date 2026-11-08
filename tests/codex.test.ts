@@ -1383,3 +1383,21 @@ test("getNextAccount: filter skips accounts that cannot serve the model", () => 
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+import { withPromptCacheKey } from "../src/upstream/codex-api";
+
+test("codex: prompt_cache_key is stable across the turns of one conversation", () => {
+  const req: any = { headers: { authorization: "Bearer k1" } };
+  const turn1 = { model: "gpt-6-luna", instructions: "sys", input: [{ role: "user", content: "audit" }] };
+  const turn2 = { ...turn1, input: [...turn1.input, { role: "assistant", content: "ok" }, { role: "user", content: "next" }] };
+  const a = withPromptCacheKey(turn1, req).prompt_cache_key;
+  assert.match(a, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+  assert.equal(withPromptCacheKey(turn2, req).prompt_cache_key, a);
+  // another client key, model or first message: another key
+  assert.notEqual(withPromptCacheKey(turn1, { headers: { authorization: "Bearer k2" } } as any).prompt_cache_key, a);
+  assert.notEqual(withPromptCacheKey({ ...turn1, model: "gpt-5.6-terra" }, req).prompt_cache_key, a);
+  assert.notEqual(withPromptCacheKey({ ...turn1, input: [{ role: "user", content: "other" }] }, req).prompt_cache_key, a);
+  // the client's own key is kept, the input body is not mutated
+  assert.equal(withPromptCacheKey({ ...turn1, prompt_cache_key: "mine" }, req).prompt_cache_key, "mine");
+  assert.equal((turn1 as any).prompt_cache_key, undefined);
+});

@@ -56,6 +56,15 @@ export interface StatsConfig {
   enabled: boolean;
 }
 
+export interface PromptCacheConfig {
+  /**
+   * Default true. Claude requests whose client sets no cache_control get
+   * automatic breakpoints (see src/upstream/auto-cache.ts). Set false to send
+   * them as received (only the injected CLI prefix is cached).
+   */
+  auto: boolean;
+}
+
 export type DebugMode = "off" | "errors" | "verbose";
 
 export interface Config {
@@ -76,6 +85,7 @@ export interface Config {
   cloaking: CloakingConfig;
   timeouts: TimeoutConfig;
   stats: StatsConfig;
+  "prompt-cache": PromptCacheConfig;
   debug: DebugMode;
 }
 
@@ -105,6 +115,9 @@ const DEFAULT_RAW: RawConfig = {
   },
   stats: {
     enabled: true,
+  },
+  "prompt-cache": {
+    auto: true,
   },
   debug: "off",
 };
@@ -152,6 +165,10 @@ export function loadConfig(configPath?: string): Config {
       cloaking: { ...DEFAULT_RAW.cloaking, ...(parsed.cloaking || {}) },
       timeouts: { ...DEFAULT_RAW.timeouts, ...(parsed.timeouts || {}) },
       stats: { ...DEFAULT_RAW.stats, ...(parsed.stats || {}) },
+      "prompt-cache": {
+        ...DEFAULT_RAW["prompt-cache"],
+        ...(parsed["prompt-cache"] || {}),
+      },
     };
   }
 

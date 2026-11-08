@@ -26,6 +26,16 @@ timeouts:
 stats:
   enabled: true
 
+# Prompt cache for Claude requests whose client sets no cache_control (OpenAI
+# chat/responses clients, simple Anthropic clients). Once the same tools +
+# system prompt were seen less than 5 min ago, breakpoints are added on the
+# last message, the previous user turn and the client system prompt, so agent
+# loops read their history from cache. Clients with their own breakpoints
+# (Claude Code, Claude Desktop) are left alone. Codex requests always get a
+# stable prompt_cache_key (unless the client sends one).
+prompt-cache:
+  auto: true
+
 # Debug logging level:
 # off = no extra logs
 # errors = upstream/network failure details

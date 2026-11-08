@@ -1,5 +1,7 @@
+import crypto from "crypto";
 import { Request } from "express";
 import { v4 as uuidv4 } from "uuid";
+import { extractApiKey, hashApiKey } from "../utils/common";
 import { Config } from "../config";
 import { AvailableAccount } from "../accounts/manager";
 import { withTimeoutSignal } from "../utils/abort";
@@ -133,6 +135,31 @@ function compactSessionSeed(body: any, request: Request): string {
   return promptCacheKey || uuidv4();
 }
 
+/**
+ * Codex CLI sends `prompt_cache_key` (its conversation id) so the backend routes
+ * every turn of a conversation to the same prompt cache. Stateless clients
+ * (chat/completions, messages, most Responses clients) send none, and their
+ * turns rarely hit the cache. Derive a stable key from what does not change
+ * during a conversation: client key, model, instructions, first input item.
+ * Two conversations that start identically share a key, which is harmless
+ * (their prefix is the same). An explicit client key is kept.
+ */
+export function withPromptCacheKey(body: any, request: Request): any {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return body;
+  if (typeof body.prompt_cache_key === "string" && body.prompt_cache_key) return body;
+  const input = Array.isArray(body.input) ? body.input[0] : body.input;
+  const digest = crypto
+    .createHash("sha256")
+    .update(hashApiKey(extractApiKey(request.headers)))
+    .update("\0" + String(body.model ?? ""))
+    .update("\0" + String(body.instructions ?? ""))
+    .update("\0" + JSON.stringify(input ?? null))
+    .digest("hex");
+  // UUID-shaped, like the conversation ids Codex CLI sends.
+  const key = `${digest.slice(0, 8)}-${digest.slice(8, 12)}-${digest.slice(12, 16)}-${digest.slice(16, 20)}-${digest.slice(20, 32)}`;
+  return { ...body, prompt_cache_key: key };
+}
+
 export interface CallCodexResponsesOptions {
   body?: any;
   request: Request;
@@ -146,9 +173,11 @@ export async function callCodexResponses(
   options: CallCodexResponsesOptions,
 ): Promise<Response> {
   const { request, account, config } = options;
-  const body = options.body ?? request.body;
   const path = options.path ?? RESPONSES_PATH;
   const isCompact = path === RESPONSES_COMPACT_PATH;
+  const raw = options.body ?? request.body;
+  // compact drops prompt_cache_key (request-scoped field, see normalizeCodexCompactBody).
+  const body = isCompact ? raw : withPromptCacheKey(raw, request);
   const stream = isCompact ? false : !!body.stream;
   const url = `${BASE_URL}${path}`;
   const timeoutMs = stream
