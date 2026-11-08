@@ -627,6 +627,21 @@ function convertResponsesPart(part: any, role: string): any[] {
 
 // ── OpenAI Responses API request → Anthropic messages request ──
 
+/**
+ * The Responses API accepts `input` as a plain string (one user message).
+ * Every backend here expects the list form (Claude/Gemini translation
+ * iterated the string, Codex answered "Input must be a list"), so expand it.
+ */
+export function normalizeResponsesInput(body: any): any {
+  if (!body || typeof body.input !== "string") return body;
+  return {
+    ...body,
+    input: [
+      { role: "user", content: [{ type: "input_text", text: body.input }] },
+    ],
+  };
+}
+
 export function responsesToAnthropic(body: any): any {
   const model = resolveModel(body.model || "claude-sonnet-4-6");
   const anthropicBody: any = {

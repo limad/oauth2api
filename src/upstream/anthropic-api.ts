@@ -50,7 +50,7 @@ function inferredBetasFromBody(body: any): string[] {
  * we bypass the SDK and use raw fetch().
  *
  * Values should match the SDK version that the target Claude Code release
- * bundles. "0.74.0" corresponds to CLI ≈ 2.1.88.
+ * bundles. "0.112.1" goes with CLI 2.1.280 (same pair as CLIProxyAPI).
  */
 function getStainlessArch(): string {
   const arch = process.arch;
@@ -107,7 +107,9 @@ export function getSessionID(apiKeyHash: string): string {
 }
 
 /** Default values */
-export const DEFAULT_CLI_VERSION = "2.1.88";
+// Anthropic gates newer models on it: claude-opus-5-5 needs >= 2.1.280
+// ("Claude Code 2.1.88 does not support this model", 2026-11-08).
+export const DEFAULT_CLI_VERSION = "2.1.280";
 export const DEFAULT_ENTRYPOINT = "cli";
 
 function buildHeaders(
@@ -135,7 +137,7 @@ function buildHeaders(
     "User-Agent": `claude-cli/${cliVersion} (external, ${entrypoint})`,
     "X-Claude-Code-Session-Id": sessionID,
     "X-Stainless-Lang": "js",
-    "X-Stainless-Package-Version": "0.74.0",
+    "X-Stainless-Package-Version": "0.112.1",
     "X-Stainless-Runtime": "node",
     "X-Stainless-Runtime-Version": "v22.13.0",
     "X-Stainless-Arch": getStainlessArch(),

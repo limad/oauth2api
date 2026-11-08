@@ -855,3 +855,18 @@ test("drainCodexResponsesSse: response.incomplete ends normally with its status"
   assert.equal(drained.status, "incomplete");
   assert.deepEqual(drained.usage, { input_tokens: 2, output_tokens: 9 });
 });
+
+import { normalizeResponsesInput } from "../src/upstream/translator";
+
+test("normalizeResponsesInput: a string input becomes one user message", () => {
+  const out = normalizeResponsesInput({ model: "m", input: "bonjour" });
+  assert.deepEqual(out.input, [
+    { role: "user", content: [{ type: "input_text", text: "bonjour" }] },
+  ]);
+  assert.equal(out.model, "m");
+});
+
+test("normalizeResponsesInput: list input is left untouched", () => {
+  const body = { input: [{ role: "user", content: "x" }] };
+  assert.equal(normalizeResponsesInput(body), body);
+});
