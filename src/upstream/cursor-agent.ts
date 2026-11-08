@@ -23,7 +23,9 @@ import {
   connectFrame,
   encodeBytesField,
   encodeVarintField,
+  ConnectError,
   extractJsonError,
+  parseConnectError,
   parseFields,
   ProtoFieldRaw,
 } from "./cursor-proto";
@@ -517,6 +519,15 @@ export async function resolveAgentModel(
 
 // --------------------------------------------------------------- decoding
 
+/** Token counts from TurnEndedUpdate. `input` is fresh input (cache excluded). */
+export interface CursorTurnUsage {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  reasoning: number;
+}
+
 export type AgentDelta =
   | { textDelta: string; reasoningDelta: string; __done?: undefined }
   | {
@@ -524,7 +535,34 @@ export type AgentDelta =
       aggregatedText: string;
       aggregatedReasoning: string;
       error?: string;
+      /** Set when the error came from Cursor itself (end-stream frame). */
+      upstreamError?: ConnectError;
+      usage?: CursorTurnUsage;
     };
+
+/**
+ * TurnEndedUpdate: input_tokens (1, whole prompt incl. cache), output (2),
+ * cache_read (3), cache_write (4), reasoning (5). Same reading as oh-my-pi.
+ */
+export function parseTurnEndedUsage(
+  payload: Uint8Array,
+): CursorTurnUsage | undefined {
+  const f = parseFields(payload);
+  const input = varintOf(f, 1);
+  const output = varintOf(f, 2);
+  const cacheRead = varintOf(f, 3);
+  const cacheWrite = varintOf(f, 4);
+  const reasoning = varintOf(f, 5);
+  if (input <= 0 && output <= 0 && cacheRead <= 0 && cacheWrite <= 0)
+    return undefined;
+  return {
+    input: Math.max(input - cacheRead - cacheWrite, 0),
+    output,
+    cacheRead,
+    cacheWrite,
+    reasoning,
+  };
+}
 
 const THINK_CLOSE_RE = /<\/think>\s*/i;
 
@@ -585,6 +623,8 @@ export async function* agentSessionDeltas(
   let text = "";
   let reasoning = "";
   let error: string | undefined;
+  let upstreamError: ConnectError | undefined;
+  let usage: CursorTurnUsage | undefined;
   let finished = false;
 
   const emit = (d: { textDelta: string; reasoningDelta: string }) => {
@@ -617,8 +657,11 @@ export async function* agentSessionDeltas(
         }
         if (flags & 2) {
           // End-of-stream frame: carries the error, if any.
-          const err = extractJsonError(payload);
-          if (err) error = err;
+          const err = parseConnectError(payload);
+          if (err) {
+            error = err.text;
+            upstreamError = err;
+          }
           finished = true;
           break;
         }
@@ -638,7 +681,12 @@ export async function* agentSessionDeltas(
             );
             if (d) out.push(d);
           }
-          if (has(u, 14)) finished = true; // turn_ended
+          if (has(u, 14)) {
+            // turn_ended, with the turn's token counts.
+            const turnEnded = bytesOf(u, 14);
+            if (turnEnded) usage = parseTurnEndedUsage(turnEnded);
+            finished = true;
+          }
         }
         const execReq = bytesOf(server, 2);
         if (execReq) {
@@ -675,6 +723,8 @@ export async function* agentSessionDeltas(
     aggregatedText: text,
     aggregatedReasoning: reasoning,
     error,
+    upstreamError,
+    usage,
   };
 }
 

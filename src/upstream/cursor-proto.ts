@@ -104,8 +104,19 @@ export function getFieldBytes(
   return fields.find((f) => f.field === field && f.wireType === 2)?.bytes;
 }
 
-/** Readable summary of a Connect end-stream / error JSON payload. */
-export function extractJsonError(payload: Uint8Array): string | undefined {
+export interface ConnectError {
+  /** Connect status, e.g. `resource_exhausted`. */
+  code?: string;
+  /** Cursor's ErrorDetails enum name, e.g. `ERROR_RATE_LIMITED_CHANGEABLE`. */
+  debug?: string;
+  /** Readable summary: code — debug — message — detail. */
+  text: string;
+}
+
+/** Parse a Connect end-stream / error JSON payload. */
+export function parseConnectError(
+  payload: Uint8Array,
+): ConnectError | undefined {
   try {
     const parsed = JSON.parse(new TextDecoder().decode(payload));
     const code = parsed?.error?.code;
@@ -114,10 +125,15 @@ export function extractJsonError(payload: Uint8Array): string | undefined {
       const debug = parsed?.error?.details?.[0]?.debug?.error;
       const detail = parsed?.error?.details?.[0]?.debug?.details?.detail;
       const parts = [code, debug, message, detail].filter(Boolean);
-      return parts.join(" — ");
+      return { code, debug, text: parts.join(" — ") };
     }
   } catch {
     /* not JSON */
   }
   return undefined;
+}
+
+/** Readable summary of a Connect end-stream / error JSON payload. */
+export function extractJsonError(payload: Uint8Array): string | undefined {
+  return parseConnectError(payload)?.text;
 }

@@ -15,6 +15,7 @@ import {
   getFieldBytes,
   parseFields,
 } from "./cursor-proto";
+import type { ConnectError } from "./cursor-proto";
 import { ensureCursorClientVersion, getCursorClientVersion } from "./cursor-version";
 import {
   agentSessionDeltas,
@@ -25,6 +26,7 @@ import {
   readAgentError,
   resolveAgentModel,
 } from "./cursor-agent";
+import type { CursorTurnUsage } from "./cursor-agent";
 
 const DEFAULT_API_BASE_URL = "https://api2.cursor.sh";
 // Chat is reverse-engineered from Cursor desktop: it lives on api2.cursor.sh
@@ -1110,6 +1112,39 @@ interface DeltaTerminator {
   aggregatedText: string;
   aggregatedReasoning: string;
   error?: string;
+  usage?: CursorTurnUsage;
+}
+
+const NO_USAGE: CursorTurnUsage = {
+  input: 0,
+  output: 0,
+  cacheRead: 0,
+  cacheWrite: 0,
+  reasoning: 0,
+};
+
+/** OpenAI Responses usage: input_tokens includes cached tokens. */
+function responsesUsage(u: CursorTurnUsage = NO_USAGE) {
+  const input = u.input + u.cacheRead + u.cacheWrite;
+  return {
+    input_tokens: input,
+    output_tokens: u.output,
+    total_tokens: input + u.output,
+    input_tokens_details: { cached_tokens: u.cacheRead },
+    output_tokens_details: { reasoning_tokens: u.reasoning },
+  };
+}
+
+/** OpenAI Chat usage: prompt_tokens includes cached tokens. */
+function chatUsage(u: CursorTurnUsage = NO_USAGE) {
+  const prompt = u.input + u.cacheRead + u.cacheWrite;
+  return {
+    prompt_tokens: prompt,
+    completion_tokens: u.output,
+    total_tokens: prompt + u.output,
+    prompt_tokens_details: { cached_tokens: u.cacheRead },
+    completion_tokens_details: { reasoning_tokens: u.reasoning },
+  };
 }
 
 type DeltaItem =
@@ -1160,13 +1195,7 @@ async function* openaiResponsesGenerator(
             content: [{ type: "output_text", text: item.aggregatedText }],
           },
         ],
-        usage: {
-          input_tokens: 0,
-          output_tokens: 0,
-          total_tokens: 0,
-          input_tokens_details: { cached_tokens: 0 },
-          output_tokens_details: { reasoning_tokens: 0 },
-        },
+        usage: responsesUsage(item.usage),
       };
       yield `event: response.completed\ndata: ${JSON.stringify({ type: "response.completed", response: completed })}\n\n`;
       yield "data: [DONE]\n\n";
@@ -1245,10 +1274,16 @@ async function* anthropicMessagesGenerator(
         });
         return;
       }
+      const u = item.usage || NO_USAGE;
       yield sseEvent("message_delta", {
         type: "message_delta",
         delta: { stop_reason: "end_turn", stop_sequence: null },
-        usage: { output_tokens: 0 },
+        usage: {
+          input_tokens: u.input,
+          output_tokens: u.output,
+          cache_read_input_tokens: u.cacheRead,
+          cache_creation_input_tokens: u.cacheWrite,
+        },
       });
       yield sseEvent("message_stop", { type: "message_stop" });
       return;
@@ -1321,7 +1356,11 @@ async function* openaiChatCompletionsGenerator(
   const created = Math.floor(Date.now() / 1000);
   const fingerprint = `fp_${uuidv4().replace(/-/g, "").slice(0, 12)}`;
 
-  const chunk = (delta: Record<string, unknown>, finishReason: string | null = null) => {
+  const chunk = (
+    delta: Record<string, unknown>,
+    finishReason: string | null = null,
+    usage?: ReturnType<typeof chatUsage>,
+  ) => {
     const payload = {
       id,
       object: "chat.completion.chunk",
@@ -1331,6 +1370,7 @@ async function* openaiChatCompletionsGenerator(
       choices: [
         { index: 0, delta, finish_reason: finishReason, logprobs: null },
       ],
+      ...(usage ? { usage } : {}),
     };
     return `data: ${JSON.stringify(payload)}\n\n`;
   };
@@ -1357,7 +1397,7 @@ async function* openaiChatCompletionsGenerator(
         return;
       }
       if (!firstChunkSent) yield sendRoleIfFirst();
-      yield chunk({}, "stop");
+      yield chunk({}, "stop", chatUsage(item.usage));
       yield "data: [DONE]\n\n";
       return;
     }
@@ -1488,6 +1528,52 @@ function errorResponse(message: string): Response {
   );
 }
 
+/**
+ * HTTP status for an error Cursor sent before any output.
+ *  - plan refusals (`*_CHANGEABLE`: model not included in the account's
+ *    plan, or not at these settings) and Cursor's catch-all "update your
+ *    client" answer for models it cannot serve -> 400: the request is wrong,
+ *    the account is fine, retrying cannot help;
+ *  - otherwise the Connect code (unauthenticated -> 401 triggers a refresh).
+ */
+export function cursorErrorStatus(err?: ConnectError): number {
+  const debug = err?.debug || "";
+  if (/_CHANGEABLE$/.test(debug) || debug === "ERROR_GPT_4_VISION_PREVIEW_RATE_LIMIT") {
+    return 400;
+  }
+  switch (err?.code) {
+    case "unauthenticated":
+      return 401;
+    case "permission_denied":
+      return 403;
+    case "resource_exhausted":
+      return 429;
+    case "invalid_argument":
+    case "not_found":
+    case "failed_precondition":
+      return 400;
+    case "unavailable":
+      return 503;
+    default:
+      return 502;
+  }
+}
+
+function cursorAgentErrorResponse(message: string, err?: ConnectError): Response {
+  const status = cursorErrorStatus(err);
+  return new Response(
+    JSON.stringify({
+      error: {
+        message: `cursor: ${message.slice(0, 500)}`,
+        type: status === 400 ? "invalid_request_error" : "upstream_error",
+        ...(err?.debug ? { code: err.debug } : {}),
+        provider: "cursor",
+      },
+    }),
+    { status, headers: { "Content-Type": "application/json" } },
+  );
+}
+
 export function normalizeCursorResponsesBody(body: any): any {
   if (!body || typeof body !== "object") return body;
   return { ...body, stream: true };
@@ -1543,7 +1629,21 @@ export async function callCursorResponses(
     if (session.status !== 200) {
       return errorResponse(`HTTP ${session.status}: ${await readAgentError(session)}`);
     }
-    return deltasToSse(agentSessionDeltas(session), publicModel, format);
+    // Wait for the first item: when Cursor refuses before any output, answer
+    // with a real HTTP error so the retry layer can tell a plan refusal or a
+    // bad request (no account cooldown) from an account or server failure.
+    const deltas = agentSessionDeltas(session);
+    const first = await deltas.next();
+    if (first.done) return errorResponse("Cursor AgentService closed the stream");
+    const head = first.value;
+    if (head.__done && head.error && !head.aggregatedText && !head.aggregatedReasoning) {
+      return cursorAgentErrorResponse(head.error, head.upstreamError);
+    }
+    async function* replay(): AsyncGenerator<DeltaItem> {
+      yield head;
+      yield* deltas;
+    }
+    return deltasToSse(replay(), publicModel, format);
   }
 
   // Legacy ChatService path (`chat-api: chat`). Cursor's chat endpoint is

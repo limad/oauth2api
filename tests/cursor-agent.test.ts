@@ -88,6 +88,19 @@ const unframe = (frame: Uint8Array) => frame.slice(5);
 const textUpdate = (t: string) => connectFrame(f(1, f(1, f(1, t))));
 const thinkingUpdate = (t: string) => connectFrame(f(1, f(4, f(1, t))));
 const turnEnded = () => connectFrame(f(1, f(14, new Uint8Array(0))));
+// TurnEndedUpdate with input 120 (incl. 100 cache read, 5 cache write), output 7, reasoning 3.
+const turnEndedWithUsage = () =>
+  connectFrame(
+    f(1, f(14, concatBytes([v(1, 120), v(2, 7), v(3, 100), v(4, 5), v(5, 3)]))),
+  );
+const cursorError = (code: string, debug: string) =>
+  endStream({
+    error: {
+      code,
+      message: "Error",
+      details: [{ debug: { error: debug, details: { detail: "why" } } }],
+    },
+  });
 const execRequest = (id: number, execId: string, variant: number) =>
   connectFrame(
     f(2, concatBytes([v(1, id), f(15, execId), f(variant, new Uint8Array(0))])),
@@ -397,18 +410,19 @@ test("AgentService errors surface as failures, not as answers", async (t) => {
     __resetCursorClientVersion();
   });
 
-  const sse = await readAll(
-    await callCursorResponses({
-      body: { model: "cursor-gpt-5.5", input: "hi" },
-      account,
-      config: makeConfig(),
-    } as any),
-  );
+  // An error before any output becomes an HTTP error, not a 200 stream.
+  const early = await callCursorResponses({
+    body: { model: "cursor-gpt-5.5", input: "hi" },
+    account,
+    config: makeConfig(),
+  } as any);
+  assert.equal(early.status, 429);
+  const body = JSON.parse(await early.text());
   assert.match(
-    sse,
-    /response\.failed[\s\S]*resource_exhausted — ERROR_X — Error — nope/,
+    body.error.message,
+    /resource_exhausted — ERROR_X — Error — nope/,
   );
-  assert.doesNotMatch(sse, /output_text\.delta/);
+  assert.equal(body.error.code, "ERROR_X");
 
   status = 401;
   const resp = await callCursorResponses({
@@ -443,4 +457,120 @@ test("anthropic format over AgentService emits a text block", async (t) => {
   );
   assert.match(sse, /content_block_delta[\s\S]*"text":"ok"/);
   assert.match(sse, /message_stop/);
+});
+
+test("TurnEndedUpdate token counts reach every output format", async (t) => {
+  __resetCursorClientVersion(LIVE);
+  __setCursorAgentTransports({
+    run: async () =>
+      fakeSession([concatBytes([textUpdate("ok"), turnEndedWithUsage()])])
+        .session,
+  });
+  t.after(() => {
+    __setCursorAgentTransports(null);
+    __resetCursorClientVersion();
+  });
+  const call = (responseFormat: string) =>
+    callCursorResponses({
+      body: {
+        model: "cursor-gpt-5.5",
+        messages: [{ role: "user", content: "hi" }],
+      },
+      account,
+      config: makeConfig(),
+      responseFormat,
+    } as any).then(readAll);
+
+  const responses = await call("openai-responses");
+  const completed = JSON.parse(
+    responses
+      .split("\n")
+      .find((l) => l.includes('"response.completed"'))!
+      .slice(6),
+  );
+  assert.deepEqual(completed.response.usage, {
+    input_tokens: 120,
+    output_tokens: 7,
+    total_tokens: 127,
+    input_tokens_details: { cached_tokens: 100 },
+    output_tokens_details: { reasoning_tokens: 3 },
+  });
+
+  const anthropic = await call("anthropic-messages");
+  const delta = JSON.parse(
+    anthropic
+      .split("\n")
+      .find((l) => l.includes('"message_delta"'))!
+      .slice(6),
+  );
+  assert.deepEqual(delta.usage, {
+    input_tokens: 15,
+    output_tokens: 7,
+    cache_read_input_tokens: 100,
+    cache_creation_input_tokens: 5,
+  });
+
+  const chat = await call("openai-chat-completions");
+  const stop = JSON.parse(
+    chat
+      .split("\n")
+      .find((l) => l.includes('"finish_reason":"stop"'))!
+      .slice(6),
+  );
+  assert.equal(stop.usage.prompt_tokens, 120);
+  assert.equal(stop.usage.completion_tokens, 7);
+  assert.equal(stop.usage.prompt_tokens_details.cached_tokens, 100);
+});
+
+test("Cursor errors before output map to HTTP statuses; plan refusals are 400", async (t) => {
+  __resetCursorClientVersion(LIVE);
+  let frames: Uint8Array[] = [];
+  __setCursorAgentTransports({ run: async () => fakeSession(frames).session });
+  t.after(() => {
+    __setCursorAgentTransports(null);
+    __resetCursorClientVersion();
+  });
+  const statusFor = async (f: Uint8Array[]) => {
+    frames = f;
+    const r = await callCursorResponses({
+      body: { model: "cursor-gpt-5.5", input: "hi" },
+      account,
+      config: makeConfig(),
+    } as any);
+    return { status: r.status, body: await r.text() };
+  };
+
+  const plan = await statusFor([
+    cursorError("resource_exhausted", "ERROR_RATE_LIMITED_CHANGEABLE"),
+  ]);
+  assert.equal(plan.status, 400);
+  assert.match(plan.body, /ERROR_RATE_LIMITED_CHANGEABLE/);
+  assert.equal(
+    (
+      await statusFor([
+        cursorError(
+          "resource_exhausted",
+          "ERROR_GPT_4_VISION_PREVIEW_RATE_LIMIT",
+        ),
+      ])
+    ).status,
+    400,
+  );
+  assert.equal(
+    (await statusFor([cursorError("unauthenticated", "ERROR_NOT_LOGGED_IN")]))
+      .status,
+    401,
+  );
+  assert.equal(
+    (await statusFor([cursorError("unavailable", "ERROR_X")])).status,
+    503,
+  );
+  assert.equal((await statusFor([turnEnded()])).status, 502, "empty turn");
+
+  // An error after some output still ends the stream (headers already sent).
+  const late = await statusFor([
+    concatBytes([textUpdate("partial"), cursorError("internal", "ERROR_X")]),
+  ]);
+  assert.equal(late.status, 200);
+  assert.match(late.body, /partial/);
 });
