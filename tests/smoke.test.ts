@@ -27,6 +27,9 @@ function makeConfig(authDir: string): Config {
     cloaking: {
       "cli-version": "2.1.88",
       entrypoint: "cli",
+      // Cursor tests mock the legacy ChatService transport and must not
+      // reach Cursor's update feed.
+      cursor: { "chat-api": "chat", "client-version": "cli-test" },
     },
     timeouts: {
       "messages-ms": 120000,

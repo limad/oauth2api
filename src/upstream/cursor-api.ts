@@ -6,7 +6,25 @@ import { v4 as uuidv4, v5 as uuidv5 } from "uuid";
 import { AccountManager, AvailableAccount } from "../accounts/manager";
 import { Config } from "../config";
 import { withTimeoutSignal } from "../utils/abort";
-import { DEFAULT_CURSOR_CLIENT_VERSION } from "../auth/cursor/storage";
+import {
+  concatBytes,
+  connectFrame,
+  encodeBytesField,
+  encodeVarintField,
+  extractJsonError,
+  getFieldBytes,
+  parseFields,
+} from "./cursor-proto";
+import { ensureCursorClientVersion, getCursorClientVersion } from "./cursor-version";
+import {
+  agentSessionDeltas,
+  buildAgentRunFrame,
+  CursorAgentSession,
+  DEFAULT_AGENT_SERVICE_URL,
+  openCursorAgentRun,
+  readAgentError,
+  resolveAgentModel,
+} from "./cursor-agent";
 
 const DEFAULT_API_BASE_URL = "https://api2.cursor.sh";
 // Chat is reverse-engineered from Cursor desktop: it lives on api2.cursor.sh
@@ -234,42 +252,6 @@ function http2Post(
   });
 }
 
-function encodeVarint(value: number): Uint8Array {
-  const bytes: number[] = [];
-  let next = value >>> 0;
-  while (next >= 0x80) {
-    bytes.push((next & 0x7f) | 0x80);
-    next >>>= 7;
-  }
-  bytes.push(next);
-  return Uint8Array.from(bytes);
-}
-
-function concatBytes(parts: ArrayLike<number>[]): Uint8Array {
-  const length = parts.reduce((sum, part) => sum + part.length, 0);
-  const out = new Uint8Array(length);
-  let offset = 0;
-  for (const part of parts) {
-    out.set(part, offset);
-    offset += part.length;
-  }
-  return out;
-}
-
-function encodeVarintField(field: number, value: number): Uint8Array {
-  return concatBytes([encodeVarint((field << 3) | 0), encodeVarint(value)]);
-}
-
-function encodeBytesField(field: number, value: Uint8Array | string): Uint8Array {
-  const payload =
-    typeof value === "string" ? new TextEncoder().encode(value) : value;
-  return concatBytes([
-    encodeVarint((field << 3) | 2),
-    encodeVarint(payload.length),
-    payload,
-  ]);
-}
-
 function encodeField(field: number, value: string | number | Uint8Array): Uint8Array {
   if (typeof value === "number") return encodeVarintField(field, value);
   return encodeBytesField(field, value);
@@ -277,14 +259,6 @@ function encodeField(field: number, value: string | number | Uint8Array): Uint8A
 
 function encodeMessage(fields: ProtoField[]): Uint8Array {
   return concatBytes(fields.map((f) => encodeField(f.field, f.value)));
-}
-
-function connectFrame(payload: Uint8Array): Uint8Array {
-  const frame = new Uint8Array(5 + payload.length);
-  frame[0] = 0;
-  new DataView(frame.buffer).setUint32(1, payload.length, false);
-  frame.set(payload, 5);
-  return frame;
 }
 
 /**
@@ -592,6 +566,29 @@ function buildCursorChecksum(token: string, machineId: string): string {
   return `${jyhEncode(buf)}${stableMachineId}`;
 }
 
+/**
+ * Which client version/commit to report. An explicit `cloaking.cursor`
+ * override wins (the commit is then only sent when also configured, since a
+ * mismatched pair looks worse than a missing one); otherwise the version
+ * tracked from Cursor's update feed is used.
+ */
+export function resolveCursorClientIdentity(config: Config): {
+  version: string;
+  commit: string;
+} {
+  const cursor = config.cloaking.cursor || {};
+  const override = cursor["client-version"]?.trim();
+  if (override) return { version: override, commit: cursor["client-commit"]?.trim() || "" };
+  const live = getCursorClientVersion();
+  return { version: live.version, commit: live.commit };
+}
+
+function cursorClientArch(): string {
+  if (process.arch === "arm64") return "aarch64";
+  if (process.arch === "x64") return "x64";
+  return process.arch;
+}
+
 export function __buildCursorHeaders(
   account: AvailableAccount,
   config: Config,
@@ -600,26 +597,26 @@ export function __buildCursorHeaders(
   const token = account.token.accessToken;
   const machineId =
     account.token.cursorServiceMachineId || account.accountUuid || account.deviceId;
-  const clientVersion =
-    cursor["client-version"] ||
-    account.token.cursorClientVersion ||
-    DEFAULT_CURSOR_CLIENT_VERSION;
+  const identity = resolveCursorClientIdentity(config);
   const configVersion =
     cursor["config-version"] || account.token.cursorConfigVersion || uuidv4();
   const sessionId = uuidv5(token, UUID_DNS_NAMESPACE);
   const clientKey = sha256Hex(token);
 
-  return {
+  // Same header set as the Cursor desktop client (cross-checked with 9router
+  // and CLIProxyAPI, 2026-11). Compression is negotiated per Connect message
+  // (connect-accept-encoding), never at the HTTP level: our HTTP/2 client does
+  // not inflate gzip bodies.
+  const headers: Record<string, string> = {
     Authorization: `Bearer ${token}`,
     "Content-Type": "application/connect+proto",
-    Accept: "application/connect+proto",
-    "Accept-Encoding": "gzip",
+    "Connect-Accept-Encoding": "gzip",
     "Connect-Protocol-Version": "1",
     "User-Agent": "connect-es/1.6.1",
-    "x-amzn-trace-id": uuidv4(),
+    "x-amzn-trace-id": `Root=${uuidv4()}`,
     "x-client-key": clientKey,
     "x-cursor-checksum": buildCursorChecksum(token, machineId),
-    "x-cursor-client-version": clientVersion,
+    "x-cursor-client-version": identity.version,
     "x-cursor-client-type": cursor["client-type"] || "ide",
     "x-cursor-client-os":
       process.platform === "darwin"
@@ -627,7 +624,7 @@ export function __buildCursorHeaders(
         : process.platform === "win32"
           ? "windows"
           : "linux",
-    "x-cursor-client-arch": process.arch,
+    "x-cursor-client-arch": cursorClientArch(),
     "x-cursor-client-device-type": "desktop",
     "x-cursor-config-version": configVersion,
     "x-cursor-timezone":
@@ -636,59 +633,8 @@ export function __buildCursorHeaders(
     "x-session-id": sessionId,
     "x-request-id": uuidv4(),
   };
-}
-
-function decodeVarint(data: Uint8Array, pos: number): [number, number] {
-  let value = 0;
-  let shift = 0;
-  while (pos < data.length) {
-    const b = data[pos++];
-    value |= (b & 0x7f) << shift;
-    if ((b & 0x80) === 0) break;
-    shift += 7;
-  }
-  return [value, pos];
-}
-
-interface ProtoFieldRaw {
-  field: number;
-  wireType: number;
-  bytes?: Uint8Array;
-  varint?: number;
-}
-
-function parseFields(data: Uint8Array): ProtoFieldRaw[] {
-  const out: ProtoFieldRaw[] = [];
-  let pos = 0;
-  while (pos < data.length) {
-    const [tag, afterTag] = decodeVarint(data, pos);
-    if (afterTag <= pos) break;
-    pos = afterTag;
-    const field = tag >> 3;
-    const wireType = tag & 7;
-    if (wireType === 0) {
-      const [v, p] = decodeVarint(data, pos);
-      out.push({ field, wireType, varint: v });
-      pos = p;
-    } else if (wireType === 2) {
-      const [len, afterLen] = decodeVarint(data, pos);
-      pos = afterLen;
-      if (len < 0 || pos + len > data.length) break;
-      out.push({ field, wireType, bytes: data.slice(pos, pos + len) });
-      pos += len;
-    } else if (wireType === 1) {
-      pos += 8;
-    } else if (wireType === 5) {
-      pos += 4;
-    } else {
-      break;
-    }
-  }
-  return out;
-}
-
-function getFieldBytes(fields: ProtoFieldRaw[], field: number): Uint8Array | undefined {
-  return fields.find((f) => f.field === field && f.wireType === 2)?.bytes;
+  if (identity.commit) headers["x-cursor-client-commit"] = identity.commit;
+  return headers;
 }
 
 interface CursorFrame {
@@ -835,23 +781,6 @@ function splitOnThinkClose(reasoning: string, text: string): ExtractParts {
     reasoning: reasoning.slice(0, idx),
     text: reasoning.slice(idx + matchLen),
   };
-}
-
-function extractJsonError(payload: Uint8Array): string | undefined {
-  try {
-    const parsed = JSON.parse(new TextDecoder().decode(payload));
-    const code = parsed?.error?.code;
-    const message = parsed?.error?.message;
-    if (code || message) {
-      const debug = parsed?.error?.details?.[0]?.debug?.error;
-      const detail = parsed?.error?.details?.[0]?.debug?.details?.detail;
-      const parts = [code, debug, message, detail].filter(Boolean);
-      return parts.join(" — ");
-    }
-  } catch {
-    /* not JSON */
-  }
-  return undefined;
 }
 
 export function decodeCursorResponse(data: Uint8Array): CursorDecodeResult {
@@ -1095,7 +1024,7 @@ async function cursorUpstreamToSse(
 
   const decoder = createCursorStreamingDecoder();
 
-  async function* deltaStream() {
+  async function* deltaStream(): AsyncGenerator<DeltaItem> {
     let aggregatedText = "";
     let aggregatedReasoning = "";
     while (true) {
@@ -1124,6 +1053,15 @@ async function cursorUpstreamToSse(
     } as DeltaTerminator;
   }
 
+  return deltasToSse(deltaStream(), model, format);
+}
+
+/** Turn a delta source into the SSE wire format the client asked for. */
+function deltasToSse(
+  deltas: AsyncGenerator<DeltaItem>,
+  model: string,
+  format: CursorSseFormat,
+): Response {
   // Use a Web ReadableStream rather than `Readable.from(generator)` — the
   // latter pulls into a 16 KB high-water-mark buffer (default for
   // non-object-mode Node streams) which silently coalesces small SSE
@@ -1131,11 +1069,11 @@ async function cursorUpstreamToSse(
   // Enqueueing each event individually preserves real-time delivery.
   let generator: AsyncGenerator<string>;
   if (format === "anthropic-messages") {
-    generator = anthropicMessagesGenerator(model, deltaStream());
+    generator = anthropicMessagesGenerator(model, deltas);
   } else if (format === "openai-chat-completions") {
-    generator = openaiChatCompletionsGenerator(model, deltaStream());
+    generator = openaiChatCompletionsGenerator(model, deltas);
   } else {
-    generator = openaiResponsesGenerator(model, deltaStream());
+    generator = openaiResponsesGenerator(model, deltas);
   }
   const encoder = new TextEncoder();
   const sseStream = new ReadableStream<Uint8Array>({
@@ -1559,15 +1497,8 @@ export async function callCursorResponses(
   options: CallCursorResponsesOptions,
 ): Promise<Response> {
   const { account, config } = options;
-  const body = normalizeCursorResponsesBody(options.body ?? options.request.body);
-  // Cursor's chat is reverse-engineered to live at api2.cursor.sh. We expose
-  // both legacy "agent-base-url" and "api-base-url" config keys so users can
-  // override the host without forcing a code change.
-  const baseUrl =
-    config.cloaking.cursor?.["agent-base-url"] ||
-    config.cloaking.cursor?.["api-base-url"] ||
-    DEFAULT_API_BASE_URL;
-  const url = `${baseUrl}${CHAT_PATH}`;
+  const body = normalizeCursorResponsesBody(options.body ?? options.request?.body);
+  const cursor = config.cloaking.cursor || {};
   const totalTimeoutMs = config.timeouts["stream-messages-ms"];
   // Header-arrival timer inside the transport is a *separate* shorter
   // deadline so an unreachable Cursor edge fails fast instead of dragging
@@ -1582,17 +1513,50 @@ export async function callCursorResponses(
   // forever (the express layer only aborts on client disconnect).
   // Mirrors how `anthropic-api.ts` wraps fetch() with withTimeoutSignal.
   const effectiveSignal = withTimeoutSignal(totalTimeoutMs, options.signal);
-  const encoded = encodeCursorChatRequest(body);
+  const publicModel = String(body.model || "cursor-default");
+  const format = options.responseFormat || "openai-responses";
 
-  // Cursor's chat endpoint is HTTP/2-only and rejects HTTP/1.1 requests with
-  // a custom 464 status. Node's fetch (undici) does not negotiate HTTP/2 by
-  // default, so we always use the hand-rolled HTTP/2 client here. Tests can
-  // swap the transport through `__setCursorTransport`.
+  // Cursor rejects outdated clients: keep the reported version current.
+  if (!cursor["client-version"]) await ensureCursorClientVersion();
+  const headers = __buildCursorHeaders(account, config);
+
+  if (cursor["chat-api"] !== "chat") {
+    const baseUrl = (cursor["agent-service-url"] || DEFAULT_AGENT_SERVICE_URL).replace(/\/$/, "");
+    const model = await resolveAgentModel(
+      normaliseModel(publicModel),
+      baseUrl,
+      headers,
+    );
+    const frame = buildAgentRunFrame(
+      messagesFromBody(body),
+      model,
+      body.reasoning_effort || body.reasoning?.effort,
+    );
+    let session: CursorAgentSession;
+    try {
+      session = await openCursorAgentRun(baseUrl, headers, frame, headerTimeoutMs, effectiveSignal);
+    } catch (err: any) {
+      throw new Error(
+        `cursor upstream HTTP/2 request failed: ${err?.message || String(err)}`,
+      );
+    }
+    if (session.status !== 200) {
+      return errorResponse(`HTTP ${session.status}: ${await readAgentError(session)}`);
+    }
+    return deltasToSse(agentSessionDeltas(session), publicModel, format);
+  }
+
+  // Legacy ChatService path (`chat-api: chat`). Cursor's chat endpoint is
+  // HTTP/2-only and rejects HTTP/1.1 requests with a custom 464 status.
+  // Tests can swap the transport through `__setCursorTransport`.
+  const baseUrl =
+    cursor["agent-base-url"] || cursor["api-base-url"] || DEFAULT_API_BASE_URL;
+  const encoded = encodeCursorChatRequest(body);
   let h2: Http2Result;
   try {
     h2 = await cursorTransport(
-      url,
-      __buildCursorHeaders(account, config),
+      `${baseUrl}${CHAT_PATH}`,
+      headers,
       Buffer.from(encoded.bytes),
       headerTimeoutMs,
       effectiveSignal,
@@ -1609,11 +1573,7 @@ export async function callCursorResponses(
   });
 
   if (!upstream.ok) return upstream;
-  return cursorUpstreamToSse(
-    upstream,
-    String(body.model || "cursor-default"),
-    options.responseFormat || "openai-responses",
-  );
+  return cursorUpstreamToSse(upstream, publicModel, format);
 }
 
 export async function listCursorModels(
