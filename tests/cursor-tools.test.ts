@@ -441,3 +441,30 @@ test("an unanswerable request is an error, not the held thinking", async () => {
   assert.equal(done.aggregatedText, "");
   assert.match(done.error, /unsupported IDE tool \(exec 99\)/);
 });
+
+test("span_context (19) on an exec request is not taken for the request type", async () => {
+  const entries = f(
+    2,
+    concatBytes([f(1, "city"), f(2, encodeProtoValue("Paris"))]),
+  );
+  const mcpArgs = concatBytes([
+    f(1, "weather"),
+    entries,
+    f(3, "c9"),
+    f(5, "weather"),
+  ]);
+  // Real Cursor order: id, exec_id, span_context, then the variant.
+  const frame = connectFrame(
+    f(
+      2,
+      concatBytes([v(1, 2), f(15, "e"), f(19, f(1, "trace")), f(11, mcpArgs)]),
+    ),
+  );
+  const { s } = session([frame]);
+  const items = [];
+  for await (const d of agentSessionDeltas(s)) items.push(d);
+  const done = items.pop() as any;
+  assert.equal(done.error, undefined);
+  assert.equal(done.toolCalls[0].id, "c9");
+  assert.equal(done.toolCalls[0].arguments, '{"city":"Paris"}');
+});
