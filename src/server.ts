@@ -21,6 +21,7 @@ import {
   INTERNAL_HEADER,
   INTERNAL_SECRET,
 } from "./handlers/ollama";
+import { createGeminiNativeRouter, geminiApiKeyHeader } from "./handlers/gemini-native";
 
 // Simple in-memory rate limiter per IP
 const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
@@ -128,7 +129,7 @@ export function createServer(
     res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
     res.setHeader(
       "Access-Control-Allow-Headers",
-      "Content-Type, Authorization, x-api-key",
+      "Content-Type, Authorization, x-api-key, x-goog-api-key",
     );
     if (_req.method === "OPTIONS") {
       res.sendStatus(204);
@@ -138,7 +139,7 @@ export function createServer(
   });
 
   // Rate limiting middleware
-  app.use(["/v1", "/api"], (req, res, next) => {
+  app.use(["/v1", "/api", "/v1beta"], (req, res, next) => {
     // Calls made by the Ollama facade to our own /v1 are already rate-limited
     // once on /api with the real client IP.
     if (req.header(INTERNAL_HEADER) === INTERNAL_SECRET) {
@@ -344,6 +345,16 @@ export function createServer(
       createOllamaRouter(),
     );
   }
+
+  // Gemini API facade (/v1beta/models/<model>:generateContent ...), translated onto
+  // /v1/messages. Usage is recorded by that internal call (one stats line per request).
+  app.use(
+    "/v1beta",
+    geminiApiKeyHeader,
+    requireApiKey,
+    express.json({ limit: config["body-limit"], type: () => true }),
+    createGeminiNativeRouter(),
+  );
 
   app.use(["/v1", "/codex", "/backend-api/codex"], requireApiKey);
   app.use(["/v1", "/codex", "/backend-api/codex"], statsFinishMiddleware);
