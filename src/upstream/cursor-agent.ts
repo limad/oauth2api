@@ -247,7 +247,12 @@ export function answerExecRequest(
     const args = bytesOf(exec, MCP_TOOL_CALL_FIELD);
     const call = args ? decodeMcpCall(args) : null;
     if (!call) return { kind: "fail", what: "mcp tool call without a name" };
-    if (!call.id) call.id = `call_${uuidv4().replace(/-/g, "")}`;
+    // Cursor ids look like "call-<uuid>-1\nfc_<uuid>_0": keep the first line
+    // and safe characters only (Anthropic tool_use ids: [A-Za-z0-9_-]). The
+    // id only has to round-trip through the client; Cursor sees text history.
+    call.id =
+      call.id.split("\n")[0].replace(/[^A-Za-z0-9_-]/g, "_") ||
+      `call_${uuidv4().replace(/-/g, "")}`;
     return { kind: "tool", call };
   }
   if (variant !== undefined && EXEC_RESULT_FIELDS.has(variant)) {
