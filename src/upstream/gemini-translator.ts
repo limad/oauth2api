@@ -148,7 +148,34 @@ function sanitizeSchema(schema: any): any {
     out[key] = sanitizeSchema(value);
   }
   if (Array.isArray(out.type)) normalizeTypeArray(out);
+  repairForGemini(out);
   return out;
+}
+
+// Shapes Gemini refuses with a 400 although JSON Schema allows them (seen with
+// MCP and agent tool schemas): an array without `items`, `items` on a
+// non-array, `properties`/`required` on a non-object, `required` naming a
+// property that does not exist, tuple `items` (a list). Only schema nodes are
+// touched: a property *named* "items" or "properties" is never affected,
+// since `properties` maps are walked separately.
+function repairForGemini(out: any): void {
+  const type = typeof out.type === "string" ? out.type.toLowerCase() : undefined;
+  if (Array.isArray(out.items)) out.items = out.items[0] ?? { type: "string" };
+  else if (out.items === true) out.items = {};
+  if (type === "array" && (out.items === undefined || out.items === null)) {
+    out.items = { type: "string" };
+  }
+  if (type && type !== "array") delete out.items;
+  if (type && type !== "object") {
+    delete out.properties;
+    delete out.required;
+  }
+  if (Array.isArray(out.required)) {
+    const props = out.properties && typeof out.properties === "object" ? out.properties : {};
+    const kept = out.required.filter((n: any) => typeof n === "string" && n in props);
+    if (kept.length) out.required = kept;
+    else delete out.required;
+  }
 }
 
 // Gemini's `type` is a single enum, not a list: `"type": ["string", "null"]`
@@ -241,32 +268,52 @@ function anthropicContentToParts(
       }
     } else if (block?.type === "tool_use" && role === "assistant") {
       const signature = block.signature || PLACEHOLDER_THOUGHT_SIGNATURE;
+      // `id` ties the call to its response: Claude models served by
+      // Antigravity refuse a call without it ("tool_use.id: Field required").
       parts.push({
-        functionCall: { name: block.name, args: block.input || {} },
+        functionCall: { ...(block.id ? { id: block.id } : {}), name: block.name, args: block.input || {} },
         thoughtSignature: signature,
         thought_signature: signature,
       });
     } else if (block?.type === "tool_result") {
       const raw = block.content;
-      let response: any;
+      // Images and PDFs returned by a tool travel as inlineData inside the
+      // functionResponse (multimodal function response), not as base64 JSON
+      // text: that cost thousands of tokens per image and the model could
+      // not see it. Gemini's convention is `output` for a result, `error`
+      // for a failure.
+      const media: any[] = [];
+      let text = "";
       if (typeof raw === "string") {
-        response = { output: raw };
+        text = raw;
       } else if (Array.isArray(raw)) {
-        response = {
-          output: raw
-            .map((c: any) => (c?.type === "text" ? c.text : JSON.stringify(c)))
-            .join(""),
-        };
+        for (const c of raw) {
+          if (c?.type === "text") text += c.text || "";
+          else if ((c?.type === "image" || c?.type === "document") && c.source?.type === "base64" && c.source.data) {
+            media.push({ inlineData: { mimeType: c.source.media_type || (c.type === "image" ? "image/png" : "application/pdf"), data: c.source.data } });
+          } else if (c?.source?.type === "url" && c.source.url) {
+            text += `[${c.type}: ${c.source.url}]`;
+          } else if (c) {
+            text += JSON.stringify(c);
+          }
+        }
       } else {
-        response = { output: JSON.stringify(raw ?? "") };
+        text = JSON.stringify(raw ?? "");
       }
-      if (block.is_error) response.error = true;
+      const response: any = block.is_error ? { error: text } : { output: text };
       // Gemini's functionResponse.name must be the ORIGINAL FUNCTION NAME
       // (e.g. "todo_write"), not the tool_use call id — Google correlates
       // by name, not id. Verified against Draculabo/AntigravityManager's
       // ClaudeRequestMapper.ts (`toolIdToName.get(block.tool_use_id)`).
       const name = toolIdToName.get(block.tool_use_id) || block.tool_use_id;
-      parts.push({ functionResponse: { name, response } });
+      parts.push({
+        functionResponse: {
+          ...(block.tool_use_id ? { id: block.tool_use_id } : {}),
+          name,
+          response,
+          ...(media.length ? { parts: media } : {}),
+        },
+      });
     } else if (
       block?.type &&
       block.type !== "thinking" &&

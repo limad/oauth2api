@@ -82,14 +82,14 @@ test("anthropicToGeminiContents: tool_use → functionCall, tool_result → func
   });
   assert.deepEqual(out.contents[0].parts[0], { text: "calling tool" });
   assert.deepEqual(out.contents[0].parts[1], {
-    functionCall: { name: "read_file", args: { path: "a.txt" } },
+    functionCall: { id: "call_1", name: "read_file", args: { path: "a.txt" } },
     thoughtSignature: "skip_thought_signature_validator",
     thought_signature: "skip_thought_signature_validator",
   });
   // functionResponse.name must be the function NAME ("read_file"), not the
   // tool_use call id ("call_1") — Gemini correlates responses by name.
   assert.deepEqual(out.contents[1].parts[0], {
-    functionResponse: { name: "read_file", response: { output: "file contents" } },
+    functionResponse: { id: "call_1", name: "read_file", response: { output: "file contents" } },
   });
 });
 
@@ -456,4 +456,56 @@ test("antigravity: sessionId is stable per conversation, negative integer like t
   assert.equal(conversationSessionId("h1", sys, turn2), a);
   assert.notEqual(conversationSessionId("h2", sys, turn1), a);
   assert.notEqual(conversationSessionId("h1", sys, [{ role: "user", parts: [{ text: "other" }] }]), a);
+});
+
+test("anthropicToGeminiContents: tool result images go inline in the functionResponse, errors under `error`", () => {
+  const out = anthropicToGeminiContents({
+    messages: [
+      { role: "user", content: "shot" },
+      { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "screenshot", input: {} }, { type: "tool_use", id: "t2", name: "read", input: {} }] },
+      {
+        role: "user",
+        content: [
+          { type: "tool_result", tool_use_id: "t1", content: [{ type: "text", text: "done" }, { type: "image", source: { type: "base64", media_type: "image/jpeg", data: "QUJD" } }] },
+          { type: "tool_result", tool_use_id: "t2", is_error: true, content: "not found" },
+        ],
+      },
+    ],
+  } as any);
+  const parts = out.contents[2].parts;
+  assert.deepEqual(parts[0].functionResponse, {
+    id: "t1",
+    name: "screenshot",
+    response: { output: "done" },
+    parts: [{ inlineData: { mimeType: "image/jpeg", data: "QUJD" } }],
+  });
+  assert.deepEqual(parts[1].functionResponse, { id: "t2", name: "read", response: { error: "not found" } });
+  assert.ok(!JSON.stringify(parts[0].functionResponse.response).includes("QUJD"));
+});
+
+test("anthropicToGeminiContents: tool schemas Gemini refuses are repaired, property names left alone", () => {
+  const out = anthropicToGeminiContents({
+    messages: [{ role: "user", content: "x" }],
+    tools: [{
+      name: "t",
+      input_schema: {
+        type: "object",
+        required: ["tags", "ghost", "items"],
+        properties: {
+          tags: { type: "array" },
+          pair: { type: "array", items: [{ type: "string" }, { type: "number" }] },
+          name: { type: "string", items: { type: "string" }, properties: { a: { type: "string" } } },
+          items: { type: "string" },
+          properties: { type: "object", properties: { x: { type: "integer" } }, required: ["x", "y"] },
+        },
+      },
+    }],
+  } as any);
+  const p = out.tools![0].functionDeclarations[0].parameters;
+  assert.deepEqual(p.required, ["tags", "items"]);
+  assert.deepEqual(p.properties.tags, { type: "array", items: { type: "string" } });
+  assert.deepEqual(p.properties.pair.items, { type: "string" });
+  assert.deepEqual(p.properties.name, { type: "string" });
+  assert.deepEqual(p.properties.items, { type: "string" });
+  assert.deepEqual(p.properties.properties, { type: "object", properties: { x: { type: "integer" } }, required: ["x"] });
 });
