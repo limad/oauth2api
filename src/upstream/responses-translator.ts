@@ -130,10 +130,25 @@ export async function drainCodexResponsesSse(
         usage = data.response?.usage ?? usage;
         status = data.response?.status || status;
         break;
+      case "response.incomplete":
+        // Normal end with a partial output (e.g. max_output_tokens reached).
+        completedResponse = data.response || null;
+        usage = data.response?.usage ?? usage;
+        status = data.response?.status || "incomplete";
+        break;
       case "response.failed":
         upstreamError = data.response?.error?.message || "Upstream error";
         break;
+      case "error":
+        upstreamError =
+          data.message || data.error?.message || "Upstream error";
+        break;
     }
+  }
+
+  // A stream cut before its final event must not pass for a complete answer.
+  if (!completedResponse && !upstreamError) {
+    upstreamError = "Upstream stream ended before the response completed";
   }
 
   return {
