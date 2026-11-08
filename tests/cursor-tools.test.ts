@@ -6,12 +6,13 @@ import {
   clientToolsFromBody,
   decodeMcpCall,
   decodeProtoValue,
-  encodeMcpTools,
+  encodeMcpToolDefinitions,
   encodeProtoValue,
 } from "../src/upstream/cursor-tools";
 import {
   __setCursorAgentTransports,
   agentSessionDeltas,
+  answerExecRequest,
   buildAgentRunFrame,
   CursorAgentSession,
 } from "../src/upstream/cursor-agent";
@@ -244,33 +245,79 @@ test("google.protobuf.Value round-trips schemas and arguments", () => {
   assert.deepEqual(decodeProtoValue(encodeProtoValue(value)), value);
 });
 
-test("run frame declares the client tools as MCP tools (field 4)", () => {
-  const tools = encodeMcpTools([
+test("tools are served in request_context and MCP state answers, not on the run frame", () => {
+  const defs = encodeMcpToolDefinitions([
     { name: "weather", description: "d", schema: WEATHER_SCHEMA },
   ]);
   const frame = buildAgentRunFrame(
     [{ role: "user", content: "hi" }],
     "gpt-5.5-medium",
     null,
-    tools,
   );
   const run = parseFields(parseFields(frame.slice(5))[0].bytes!);
-  const mcp = run.find((x) => x.field === 4)!.bytes!;
-  const def = parseFields(parseFields(mcp)[0].bytes!);
-  const s = (n: number) =>
-    Buffer.from(def.find((x) => x.field === n)!.bytes!).toString("utf8");
-  assert.equal(s(1), "weather");
-  assert.equal(s(2), "d");
-  assert.equal(s(5), "weather");
-  assert.deepEqual(
-    decodeProtoValue(def.find((x) => x.field === 3)!.bytes!),
-    WEATHER_SCHEMA,
-  );
-  // Field order: 1, 2, 3, 4 (tools), 9.
   assert.deepEqual(
     run.map((x) => x.field),
-    [1, 2, 3, 4, 9],
+    [1, 2, 3, 9],
   );
+
+  const execPayload = (variant: number, inner = new Uint8Array(0)) =>
+    concatBytes([v(1, 3), f(15, "e1"), f(variant, inner)]);
+  const replyResult = (frame: Uint8Array, field: number) => {
+    const exec = parseFields(parseFields(frame.slice(5))[0].bytes!);
+    return exec.find((x) => x.field === field)!.bytes!;
+  };
+  const defFields = (bytes: Uint8Array) => {
+    const d = parseFields(bytes);
+    const s = (n: number) =>
+      Buffer.from(d.find((x) => x.field === n)!.bytes!).toString("utf8");
+    return {
+      name: s(1),
+      description: s(2),
+      provider: s(4),
+      toolName: s(5),
+      schema: decodeProtoValue(d.find((x) => x.field === 3)!.bytes!),
+    };
+  };
+  const expected = {
+    name: "weather",
+    description: "d",
+    provider: "oauth2api",
+    toolName: "weather",
+    schema: WEATHER_SCHEMA,
+  };
+
+  // request_context: RequestContextResult.success.request_context.tools (7)
+  const ctx = answerExecRequest(execPayload(10), defs) as any;
+  assert.equal(ctx.kind, "reply");
+  const context = parseFields(
+    parseFields(parseFields(replyResult(ctx.frame, 10))[0].bytes!)[0].bytes!,
+  );
+  assert.deepEqual(
+    defFields(context.find((x) => x.field === 7)!.bytes!),
+    expected,
+  );
+
+  // mcp_state (36): success.servers[0] { name, identifier, tools (5), status }
+  const state = answerExecRequest(execPayload(36), defs) as any;
+  const server = parseFields(
+    parseFields(parseFields(replyResult(state.frame, 36))[0].bytes!)[0].bytes!,
+  );
+  const str = (n: number) =>
+    Buffer.from(server.find((x) => x.field === n)!.bytes!).toString("utf8");
+  assert.equal(str(1), "oauth2api");
+  assert.equal(str(7), "connected");
+  assert.deepEqual(
+    defFields(server.find((x) => x.field === 5)!.bytes!),
+    expected,
+  );
+  // A request for other servers only gets an empty list.
+  const other = answerExecRequest(execPayload(36, f(1, "github")), defs) as any;
+  assert.equal(parseFields(replyResult(other.frame, 36))[0].bytes!.length, 0);
+
+  // MCP allowlist precheck (42): empty result ("not allowlisted").
+  const pre = answerExecRequest(execPayload(42), defs) as any;
+  assert.equal(pre.kind, "reply");
+  assert.equal(replyResult(pre.frame, 42).length, 0);
 });
 
 test("decodeMcpCall reads name, id and typed args", () => {
@@ -378,4 +425,19 @@ test("tool calls come out in Chat, Anthropic and Responses formats", async (t) =
     completed.response.output.map((o: any) => o.type),
     ["function_call"],
   );
+});
+
+test("an unanswerable request is an error, not the held thinking", async () => {
+  const unknownExec = connectFrame(
+    f(2, concatBytes([v(1, 5), f(15, "e"), f(99, new Uint8Array(0))])),
+  );
+  const thinking = connectFrame(
+    f(1, f(4, f(1, "I need GetDynamicTools first."))),
+  );
+  const { s } = session([concatBytes([thinking, unknownExec])]);
+  const items = [];
+  for await (const d of agentSessionDeltas(s)) items.push(d);
+  const done = items.pop() as any;
+  assert.equal(done.aggregatedText, "");
+  assert.match(done.error, /unsupported IDE tool \(exec 99\)/);
 });

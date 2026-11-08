@@ -29,7 +29,12 @@ import {
   parseFields,
   ProtoFieldRaw,
 } from "./cursor-proto";
-import { AgentMessage, CursorToolCall, decodeMcpCall } from "./cursor-tools";
+import {
+  AgentMessage,
+  CursorToolCall,
+  decodeMcpCall,
+  MCP_PROVIDER,
+} from "./cursor-tools";
 
 export const DEFAULT_AGENT_SERVICE_URL = "https://agent.api5.cursor.sh";
 export const AGENT_RUN_PATH = "/agent.v1.AgentService/Run";
@@ -59,8 +64,6 @@ export function buildAgentRunFrame(
   messages: AgentMessage[],
   model: string,
   reasoningEffort?: string | null,
-  /** Encoded McpTools (client function tools), or empty. */
-  mcpTools: Uint8Array = EMPTY,
 ): Uint8Array {
   const system = messages
     .filter((m) => m.role === "system" && m.content)
@@ -127,7 +130,6 @@ export function buildAgentRunFrame(
     msg(1, EMPTY), // empty ConversationState = fresh session
     msg(2, msg(1, userAction)), // ConversationAction.user_message_action
     msg(3, modelDetails),
-    ...(mcpTools.length ? [msg(4, mcpTools)] : []),
     msg(9, requestedModel),
   ]);
   return connectFrame(msg(1, runRequest));
@@ -175,6 +177,9 @@ function execReply(
 // ExecServerMessage variant -> ExecClientMessage result field (same numbers).
 const EXEC_RESULT_FIELDS = new Set([2, 3, 4, 5, 7, 8, 9, 16, 20, 23]);
 const REQUEST_CONTEXT_FIELD = 10;
+const MCP_STATE_FIELD = 36;
+// Shell / MCP / web-fetch allowlist prechecks: answered "not allowlisted".
+const ALLOWLIST_PRECHECK_FIELDS = new Set([41, 42, 43]);
 const MCP_TOOL_CALL_FIELD = 11;
 const TOOL_UNAVAILABLE =
   "Tool not available in this environment. Answer with text instead.";
@@ -184,18 +189,57 @@ export type ExecAction =
   | { kind: "tool"; call: CursorToolCall }
   | { kind: "fail"; what: string };
 
-/** Decide how to answer an ExecServerMessage. Exported for tests. */
-export function answerExecRequest(payload: Uint8Array): ExecAction {
+/**
+ * Decide how to answer an ExecServerMessage. `toolDefs` are the client's
+ * tools as McpToolDefinition messages. Exported for tests.
+ */
+export function answerExecRequest(
+  payload: Uint8Array,
+  toolDefs: Uint8Array[] = [],
+): ExecAction {
   const exec = parseFields(payload);
   if (has(exec, REQUEST_CONTEXT_FIELD)) {
-    // RequestContextResult.success with an empty context.
+    // RequestContextResult.success { RequestContext { tools = 7 } }.
+    const context = concatBytes(toolDefs.map((d) => msg(7, d)));
     return {
       kind: "reply",
-      frame: execReply(exec, REQUEST_CONTEXT_FIELD, msg(1, msg(1, EMPTY))),
+      frame: execReply(exec, REQUEST_CONTEXT_FIELD, msg(1, msg(1, context))),
       what: "request_context",
     };
   }
   const variant = exec.find((f) => f.field !== 1 && f.field !== 15)?.field;
+  if (variant === MCP_STATE_FIELD) {
+    // McpStateExecResult.success { servers }: our one server and its tools,
+    // unless the request names other servers only.
+    const args = parseFields(bytesOf(exec, MCP_STATE_FIELD) || EMPTY);
+    const wanted = args
+      .filter((f) => f.field === 1 && f.bytes)
+      .map((f) => Buffer.from(f.bytes!).toString("utf8"));
+    const servers =
+      toolDefs.length && (!wanted.length || wanted.includes(MCP_PROVIDER))
+        ? msg(
+            1,
+            concatBytes([
+              msg(1, MCP_PROVIDER),
+              msg(2, MCP_PROVIDER),
+              ...toolDefs.map((d) => msg(5, d)),
+              msg(7, "connected"),
+            ]),
+          )
+        : EMPTY;
+    return {
+      kind: "reply",
+      frame: execReply(exec, MCP_STATE_FIELD, msg(1, servers)),
+      what: "mcp_state",
+    };
+  }
+  if (variant !== undefined && ALLOWLIST_PRECHECK_FIELDS.has(variant)) {
+    return {
+      kind: "reply",
+      frame: execReply(exec, variant, EMPTY),
+      what: `precheck ${variant}`,
+    };
+  }
   if (variant === MCP_TOOL_CALL_FIELD) {
     // A client tool: hand it back to the client instead of answering.
     const args = bytesOf(exec, MCP_TOOL_CALL_FIELD);
@@ -631,6 +675,8 @@ class ThinkSplitter {
  */
 export async function* agentSessionDeltas(
   session: CursorAgentSession,
+  /** Client tools as McpToolDefinition messages. */
+  toolDefs: Uint8Array[] = [],
 ): AsyncGenerator<AgentDelta> {
   let buffer: Uint8Array = new Uint8Array(0);
   const splitter = new ThinkSplitter();
@@ -709,7 +755,7 @@ export async function* agentSessionDeltas(
         }
         const execReq = bytesOf(server, 2);
         if (execReq) {
-          const action = answerExecRequest(execReq);
+          const action = answerExecRequest(execReq, toolDefs);
           if (action.kind === "reply") session.write(action.frame);
           else if (action.kind === "tool") {
             // End the turn after this chunk: parallel calls usually arrive
@@ -722,6 +768,7 @@ export async function* agentSessionDeltas(
             });
           } else {
             error = `Cursor AgentService requested an unsupported IDE tool (${action.what})`;
+            console.error(`[cursor] unanswered AgentService request: ${action.what}`);
             finished = true;
           }
         }
@@ -740,8 +787,10 @@ export async function* agentSessionDeltas(
     session.close();
   }
 
+  // Held thinking becomes the answer only for a turn that ended normally:
+  // after an error it is the model's half-finished plan, not a reply.
   const held = splitter.drain();
-  if (held && !text && !toolCalls.length) {
+  if (held && !text && !toolCalls.length && !error) {
     text = held;
     yield { textDelta: held, reasoningDelta: "" };
   }
