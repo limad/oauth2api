@@ -177,6 +177,7 @@ function execReply(
 // ExecServerMessage variant -> ExecClientMessage result field (same numbers).
 const EXEC_RESULT_FIELDS = new Set([2, 3, 4, 5, 7, 8, 9, 16, 20, 23]);
 const REQUEST_CONTEXT_FIELD = 10;
+const EXEC_ENVELOPE_FIELDS = new Set([1, 15, 19]);
 const MCP_STATE_FIELD = 36;
 // Shell / MCP / web-fetch allowlist prechecks: answered "not allowlisted".
 const ALLOWLIST_PRECHECK_FIELDS = new Set([41, 42, 43]);
@@ -207,7 +208,8 @@ export function answerExecRequest(
       what: "request_context",
     };
   }
-  const variant = exec.find((f) => f.field !== 1 && f.field !== 15)?.field;
+  // Fields outside the request oneof: id (1), exec_id (15), span_context (19).
+  const variant = exec.find((f) => !EXEC_ENVELOPE_FIELDS.has(f.field))?.field;
   if (variant === MCP_STATE_FIELD) {
     // McpStateExecResult.success { servers }: our one server and its tools,
     // unless the request names other servers only.
