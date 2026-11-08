@@ -1,6 +1,6 @@
 import { Request, Response as ExpressResponse } from "express";
 import { Config, isDebugLevel } from "../config";
-import { extractUsage } from "../accounts/manager";
+import { chatCompletionsUsage, extractUsage } from "../accounts/manager";
 import { ProviderRegistry } from "../providers/registry";
 import { proxyWithRetry } from "../utils/http";
 import { tagStatsModel, tagStatsUsage } from "../stats/recorder";
@@ -442,12 +442,14 @@ async function proxyCursorChatCompletions(args: {
       let aggregatedText = "";
       let aggregatedReasoning = "";
       let upstreamError: { message: string; type?: string } | null = null;
+      let upstreamUsage: any = null;
       for await (const { data } of readSseEvents(upstream)) {
         if (!data) continue;
         if (data.error) {
           upstreamError = data.error;
           continue;
         }
+        if (data.usage) upstreamUsage = data.usage;
         const delta = data.choices?.[0]?.delta;
         if (delta) {
           if (typeof delta.content === "string")
@@ -485,19 +487,13 @@ async function proxyCursorChatCompletions(args: {
         created: Math.floor(Date.now() / 1000),
         model,
         choices: [{ index: 0, message, finish_reason: "stop", logprobs: null }],
-        usage: {
+        usage: upstreamUsage || {
           prompt_tokens: 0,
           completion_tokens: 0,
           total_tokens: 0,
         },
       };
-      const cursorChatUsage = {
-        inputTokens: 0,
-        outputTokens: 0,
-        cacheCreationInputTokens: 0,
-        cacheReadInputTokens: 0,
-        reasoningOutputTokens: 0,
-      };
+      const cursorChatUsage = chatCompletionsUsage(upstreamUsage);
       provider.manager.recordSuccess(account.token.email, cursorChatUsage);
       tagStatsUsage(resp, cursorChatUsage);
       resp.json(completion);

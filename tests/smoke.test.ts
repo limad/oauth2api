@@ -2273,3 +2273,108 @@ test("ollama facade is mounted only when ollama-facade is true", async (t) => {
     "Ollama is running",
   );
 });
+
+test("cursor AgentService: plan refusal is a 400 without cooldown, tokens reach non-stream chat", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  saveToken(
+    authDir,
+    makeToken({
+      accessToken: "cursor-access",
+      refreshToken: "cursor-refresh",
+      email: "cursor-agent@example.com",
+      accountUuid: "cursor-machine",
+      provider: "cursor",
+      cursorServiceMachineId: "cursor-machine",
+    }),
+  );
+  const { __setCursorAgentTransports } = await import(
+    "../src/upstream/cursor-agent"
+  );
+  const proto = await import("../src/upstream/cursor-proto");
+  const f = proto.encodeBytesField;
+  const v = proto.encodeVarintField;
+  const errorFrame = (() => {
+    const json = Buffer.from(
+      JSON.stringify({
+        error: {
+          code: "resource_exhausted",
+          message: "Error",
+          details: [
+            {
+              debug: {
+                error: "ERROR_RATE_LIMITED_CHANGEABLE",
+                details: { detail: "Free includes Grok 4.7 with fixed settings." },
+              },
+            },
+          ],
+        },
+      }),
+    );
+    const frame = Buffer.alloc(5 + json.length);
+    frame[0] = 2;
+    frame.writeUInt32BE(json.length, 1);
+    json.copy(frame, 5);
+    return frame;
+  })();
+  const answer = proto.concatBytes([
+    proto.connectFrame(f(1, f(1, f(1, "OK")))),
+    proto.connectFrame(f(1, f(14, proto.concatBytes([v(1, 50), v(2, 2)])))),
+  ]);
+  let refuse = true;
+  let runs = 0;
+  __setCursorAgentTransports({
+    run: async () => {
+      runs++;
+      const chunk = refuse ? new Uint8Array(errorFrame) : answer;
+      return {
+        status: 200,
+        headers: {},
+        chunks: (async function* () {
+          yield chunk;
+        })(),
+        write: () => {},
+        close: () => {},
+      };
+    },
+  });
+  const cfg = makeConfig(authDir);
+  cfg.cloaking.cursor = { "client-version": "cli-test" }; // AgentService path, no feed
+  const server = await startAppWithLoadedRegistry(cfg);
+  t.after(async () => {
+    __setCursorAgentTransports(null);
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+  const chat = () =>
+    requestJson({
+      server,
+      method: "POST",
+      path: "/v1/chat/completions",
+      headers: { Authorization: "Bearer test-key", "Content-Type": "application/json" },
+      body: {
+        model: "cursor-grok-4.7",
+        messages: [{ role: "user", content: "hi" }],
+        stream: false,
+      },
+    });
+
+  const refused = await chat();
+  assert.equal(refused.status, 400);
+  assert.match(JSON.stringify(refused.body), /ERROR_RATE_LIMITED_CHANGEABLE/);
+  assert.equal(runs, 1, "a plan refusal is not retried");
+  const admin = await requestJson({
+    server,
+    method: "GET",
+    path: "/admin/accounts",
+    headers: { "x-api-key": "test-key" },
+  });
+  const acct = admin.body.providers.cursor.accounts[0];
+  assert.equal(acct.available, true, "no cooldown after a plan refusal");
+
+  refuse = false;
+  const ok = await chat();
+  assert.equal(ok.status, 200);
+  assert.equal(ok.body.choices[0].message.content, "OK");
+  assert.equal(ok.body.usage.prompt_tokens, 50);
+  assert.equal(ok.body.usage.completion_tokens, 2);
+});
