@@ -1,4 +1,5 @@
 import { PKCECodes, TokenData } from "../auth/types";
+import { callChatAsAnthropic } from "../upstream/chat-adapter";
 import { loadAllTokens } from "../auth/token-storage";
 import { AccountManager } from "../accounts/manager";
 import { callCopilotChatCompletions, listCopilotModels } from "../upstream/copilot-api";
@@ -49,5 +50,15 @@ export function buildCopilotProvider(authDir: string): Provider {
         config: opts.config,
         signal: opts.signal,
       }),
+    callAnthropicMessages: (opts: UpstreamCallContext) =>
+      callChatAsAnthropic(opts.body ?? opts.request.body, (chatBody) =>
+        callCopilotChatCompletions({
+          body: chatBody,
+          request: opts.request,
+          account: opts.account,
+          config: opts.config,
+          signal: opts.signal,
+        }),
+      ),
   };
 }

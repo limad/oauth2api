@@ -76,3 +76,20 @@ export function buildRegistry(authDir: string): ProviderRegistry {
     withAccounts: () => ordered.filter((p) => p.manager.accountCount > 0),
   };
 }
+
+/**
+ * The provider as the Anthropic-format handlers (/v1/messages, /v1/responses)
+ * should see it: a Chat-Completions-only provider with an Anthropic adapter
+ * becomes Anthropic-native there (no cloaking, local count_tokens estimate).
+ * Any other provider is returned as is.
+ */
+export function anthropicView(provider: Provider): Provider {
+  if (provider.nativeFormat !== "openai-chat" || !provider.callAnthropicMessages) return provider;
+  return {
+    ...provider,
+    nativeFormat: "anthropic-messages",
+    callMessages: provider.callAnthropicMessages,
+    callCountTokens: undefined,
+    applyCloaking: undefined,
+  };
+}

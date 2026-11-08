@@ -1,7 +1,7 @@
 import { Request, Response as ExpressResponse } from "express";
 import { Config, isDebugLevel } from "../config";
 import { chatCompletionsUsage, extractUsage } from "../accounts/manager";
-import { ProviderRegistry } from "../providers/registry";
+import { ProviderRegistry, anthropicView } from "../providers/registry";
 import { proxyWithRetry } from "../utils/http";
 import { tagStatsModel, tagStatsUsage } from "../stats/recorder";
 import {
@@ -700,7 +700,7 @@ export function createResponsesHandler(
       }
 
       const model = resolveModel(body.model || "claude-sonnet-4-6");
-      const provider = registry.forModel(model);
+      const provider = anthropicView(registry.forModel(model));
       tagStatsModel(resp, model, provider.id);
 
       // The client-requested streaming intent is captured BEFORE we
