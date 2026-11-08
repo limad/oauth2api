@@ -3,6 +3,7 @@ import readline from "readline";
 import { Config, loadConfig, resolveAuthDir } from "./config";
 import { ProviderId } from "./auth/types";
 import { generatePKCECodes } from "./auth/pkce";
+import { generateClaudeState } from "./auth/oauth";
 import { waitForCallback } from "./auth/callback-server";
 import { importCursorTokenFromLocalStorage } from "./auth/cursor/storage";
 import { runCursorBrowserLogin } from "./auth/cursor/browser-oauth";
@@ -120,7 +121,10 @@ async function doLogin(
   const provider = registry.get(providerId);
 
   const pkce = generatePKCECodes();
-  const state = crypto.randomBytes(16).toString("hex");
+  const state =
+    providerId === "anthropic"
+      ? generateClaudeState()
+      : crypto.randomBytes(16).toString("hex");
 
   const authURL = provider.buildAuthUrl(state, pkce);
   console.log(`\nLogging in to ${provider.id}.`);
