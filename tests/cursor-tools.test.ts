@@ -468,3 +468,18 @@ test("span_context (19) on an exec request is not taken for the request type", a
   assert.equal(done.toolCalls[0].id, "c9");
   assert.equal(done.toolCalls[0].arguments, '{"city":"Paris"}');
 });
+
+test("Cursor's two-line tool call ids are reduced to a safe single token", async () => {
+  const mcpArgs = concatBytes([
+    f(1, "weather"),
+    f(3, "call-768ade1c-590e-1\nfc_ab9b:0"),
+    f(5, "weather"),
+  ]);
+  const frame = connectFrame(
+    f(2, concatBytes([v(1, 2), f(15, "e"), f(11, mcpArgs)])),
+  );
+  const { s } = session([frame]);
+  const items = [];
+  for await (const d of agentSessionDeltas(s)) items.push(d);
+  assert.equal((items.pop() as any).toolCalls[0].id, "call-768ade1c-590e-1");
+});
