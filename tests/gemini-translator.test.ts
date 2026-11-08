@@ -239,6 +239,30 @@ test("geminiResponseToAnthropic: translates text response with usage", () => {
   });
 });
 
+test("geminiResponseToAnthropic: cached tokens counted once, thinking counted as output", () => {
+  const out = geminiResponseToAnthropic(
+    {
+      response: {
+        candidates: [
+          { content: { role: "model", parts: [{ text: "ok" }] }, finishReason: "STOP" },
+        ],
+        usageMetadata: {
+          promptTokenCount: 1000,
+          cachedContentTokenCount: 800,
+          candidatesTokenCount: 20,
+          thoughtsTokenCount: 30,
+        },
+      },
+    },
+    "gemini-3.8-flash-low",
+  );
+  assert.deepEqual(out.usage, {
+    input_tokens: 200,
+    output_tokens: 50,
+    cache_read_input_tokens: 800,
+  });
+});
+
 test("geminiResponseToAnthropic: functionCall part → tool_use, stop_reason tool_use", () => {
   const out = geminiResponseToAnthropic(
     {

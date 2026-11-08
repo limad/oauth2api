@@ -375,10 +375,16 @@ function usageFromMetadata(usage: any): {
   output_tokens: number;
   cache_read_input_tokens: number;
 } {
+  // Gemini's promptTokenCount already includes the cached part, while
+  // Anthropic's input_tokens is the uncached part only (callers add
+  // cache_read back for OpenAI prompt_tokens). Thinking tokens are reported
+  // apart from candidatesTokenCount; Anthropic counts them as output.
+  const cached = usage?.cachedContentTokenCount || 0;
   return {
-    input_tokens: usage?.promptTokenCount || 0,
-    output_tokens: usage?.candidatesTokenCount || 0,
-    cache_read_input_tokens: usage?.cachedContentTokenCount || 0,
+    input_tokens: Math.max(0, (usage?.promptTokenCount || 0) - cached),
+    output_tokens:
+      (usage?.candidatesTokenCount || 0) + (usage?.thoughtsTokenCount || 0),
+    cache_read_input_tokens: cached,
   };
 }
 
