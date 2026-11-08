@@ -29,15 +29,13 @@ import {
   parseFields,
   ProtoFieldRaw,
 } from "./cursor-proto";
+import { AgentMessage, CursorToolCall, decodeMcpCall } from "./cursor-tools";
 
 export const DEFAULT_AGENT_SERVICE_URL = "https://agent.api5.cursor.sh";
 export const AGENT_RUN_PATH = "/agent.v1.AgentService/Run";
 export const AGENT_MODELS_PATH = "/agent.v1.AgentService/GetUsableModels";
 
-export interface AgentMessage {
-  role: string;
-  content: string;
-}
+export type { AgentMessage } from "./cursor-tools";
 
 // ---------------------------------------------------------------- encoding
 
@@ -61,6 +59,8 @@ export function buildAgentRunFrame(
   messages: AgentMessage[],
   model: string,
   reasoningEffort?: string | null,
+  /** Encoded McpTools (client function tools), or empty. */
+  mcpTools: Uint8Array = EMPTY,
 ): Uint8Array {
   const system = messages
     .filter((m) => m.role === "system" && m.content)
@@ -127,6 +127,7 @@ export function buildAgentRunFrame(
     msg(1, EMPTY), // empty ConversationState = fresh session
     msg(2, msg(1, userAction)), // ConversationAction.user_message_action
     msg(3, modelDetails),
+    ...(mcpTools.length ? [msg(4, mcpTools)] : []),
     msg(9, requestedModel),
   ]);
   return connectFrame(msg(1, runRequest));
@@ -180,6 +181,7 @@ const TOOL_UNAVAILABLE =
 
 export type ExecAction =
   | { kind: "reply"; frame: Uint8Array; what: string }
+  | { kind: "tool"; call: CursorToolCall }
   | { kind: "fail"; what: string };
 
 /** Decide how to answer an ExecServerMessage. Exported for tests. */
@@ -194,8 +196,14 @@ export function answerExecRequest(payload: Uint8Array): ExecAction {
     };
   }
   const variant = exec.find((f) => f.field !== 1 && f.field !== 15)?.field;
-  if (variant === MCP_TOOL_CALL_FIELD)
-    return { kind: "fail", what: "mcp tool call" };
+  if (variant === MCP_TOOL_CALL_FIELD) {
+    // A client tool: hand it back to the client instead of answering.
+    const args = bytesOf(exec, MCP_TOOL_CALL_FIELD);
+    const call = args ? decodeMcpCall(args) : null;
+    if (!call) return { kind: "fail", what: "mcp tool call without a name" };
+    if (!call.id) call.id = `call_${uuidv4().replace(/-/g, "")}`;
+    return { kind: "tool", call };
+  }
   if (variant !== undefined && EXEC_RESULT_FIELDS.has(variant)) {
     // Diagnostics (9) has no "rejected" form: an empty success unblocks it.
     const result = variant === 9 ? EMPTY : msg(2, msg(2, TOOL_UNAVAILABLE));
@@ -529,11 +537,17 @@ export interface CursorTurnUsage {
 }
 
 export type AgentDelta =
-  | { textDelta: string; reasoningDelta: string; __done?: undefined }
+  | {
+      textDelta: string;
+      reasoningDelta: string;
+      toolCall?: CursorToolCall;
+      __done?: undefined;
+    }
   | {
       __done: true;
       aggregatedText: string;
       aggregatedReasoning: string;
+      toolCalls?: CursorToolCall[];
       error?: string;
       /** Set when the error came from Cursor itself (end-stream frame). */
       upstreamError?: ConnectError;
@@ -627,6 +641,7 @@ export async function* agentSessionDeltas(
   let usage: CursorTurnUsage | undefined;
   let finished = false;
 
+  const toolCalls: CursorToolCall[] = [];
   const emit = (d: { textDelta: string; reasoningDelta: string }) => {
     text += d.textDelta;
     reasoning += d.reasoningDelta;
@@ -636,7 +651,11 @@ export async function* agentSessionDeltas(
   try {
     for await (const chunk of session.chunks) {
       buffer = concatBytes([buffer, chunk]);
-      const out: { textDelta: string; reasoningDelta: string }[] = [];
+      const out: {
+        textDelta: string;
+        reasoningDelta: string;
+        toolCall?: CursorToolCall;
+      }[] = [];
       let pos = 0;
       while (!finished && pos + 5 <= buffer.length) {
         const flags = buffer[pos];
@@ -692,7 +711,16 @@ export async function* agentSessionDeltas(
         if (execReq) {
           const action = answerExecRequest(execReq);
           if (action.kind === "reply") session.write(action.frame);
-          else {
+          else if (action.kind === "tool") {
+            // End the turn after this chunk: parallel calls usually arrive
+            // together; the client runs them and sends the results back.
+            toolCalls.push(action.call);
+            out.push({
+              textDelta: "",
+              reasoningDelta: "",
+              toolCall: action.call,
+            });
+          } else {
             error = `Cursor AgentService requested an unsupported IDE tool (${action.what})`;
             finished = true;
           }
@@ -705,6 +733,7 @@ export async function* agentSessionDeltas(
       }
       buffer = buffer.slice(pos);
       for (const d of out) yield d;
+      if (toolCalls.length) finished = true;
       if (finished) break;
     }
   } finally {
@@ -712,16 +741,17 @@ export async function* agentSessionDeltas(
   }
 
   const held = splitter.drain();
-  if (held && !text) {
+  if (held && !text && !toolCalls.length) {
     text = held;
     yield { textDelta: held, reasoningDelta: "" };
   }
-  if (!text && !reasoning && !error)
+  if (!text && !reasoning && !error && !toolCalls.length)
     error = "Cursor AgentService returned an empty turn";
   yield {
     __done: true,
     aggregatedText: text,
     aggregatedReasoning: reasoning,
+    ...(toolCalls.length ? { toolCalls } : {}),
     error,
     upstreamError,
     usage,

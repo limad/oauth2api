@@ -133,7 +133,6 @@ cloaking:
     client-type: "ide"
     # client-version: "3.29.9"
     # client-commit: "306d153d51d714882ab7b1bc49649cab624e8a31"
-    # chat-api: "chat"   # 旧的 ChatService 路径
     api-base-url: "https://api2.cursor.sh"
 ```
 
@@ -225,7 +224,7 @@ OpenAI Responses / Chat / Claude Code 客户端无需关心 codex 的特殊行�
 
 #### Cursor `/v1/responses` 限制
 
-Cursor 的 chat 协议是逆向得到的：请求走 `api2.cursor.sh/aiserver.v1.ChatService/StreamUnifiedChatWithTools`，HTTP/2 + `application/connect+proto`，响应被解码后再转换回 OpenAI Responses SSE delta。Cursor 只支持流式，所以 `stream` 会被强制开启。当前仅覆盖单轮流式文本：工具调用、图片、仓库上下文、编辑动作以及 Cursor 更完整的 agent 协议暂不转换。
+Cursor 的 chat 协议是逆向得到的：请求走 `agent.api5.cursor.sh/agent.v1.AgentService/Run`（HTTP/2 双向流，`application/connect+proto`），响应再转换为 OpenAI Responses / Anthropic Messages / Chat Completions SSE。Cursor 只支持流式，所以 `stream` 会被强制开启。客户端的 function 工具以 MCP 工具形式传给 Cursor，调用会返回给客户端执行；图片、仓库上下文和 Cursor 自带的 IDE 工具不转换。
 
 Decoder 会把 Cursor 上游的 chain-of-thought（reasoning）字节路由到 `response.reasoning_summary_text.delta` 事件，避免污染主 `response.output_text.delta`。对于 Composer / Kimi 这种把整段（思考 + 答案）都塞进 reasoning 通道的模型，decoder 会按第一处 `</think>` 标签拆分——前面留在 reasoning，后面回到正文 `output_text`。
 

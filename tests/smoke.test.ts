@@ -27,9 +27,8 @@ function makeConfig(authDir: string): Config {
     cloaking: {
       "cli-version": "2.1.88",
       entrypoint: "cli",
-      // Cursor tests mock the legacy ChatService transport and must not
-      // reach Cursor's update feed.
-      cursor: { "chat-api": "chat", "client-version": "cli-test" },
+      // Pinned so Cursor tests never reach Cursor's update feed.
+      cursor: { "client-version": "cli-test" },
     },
     timeouts: {
       "messages-ms": 120000,
@@ -244,14 +243,48 @@ function encodeBytesField(field: number, payload: Buffer): Buffer {
   return Buffer.concat([tag, len, payload]);
 }
 
+/** AgentServerMessage.interaction_update.text_delta frame (Cursor AgentService). */
 function connectProtoTextFrame(text: string): Uint8Array {
   const inner = encodeBytesField(1, Buffer.from(text, "utf8"));
-  const outer = encodeBytesField(2, inner);
+  const outer = encodeBytesField(1, encodeBytesField(1, inner));
   const frame = Buffer.alloc(5 + outer.length);
   frame[0] = 0;
   frame.writeUInt32BE(outer.length, 1);
   outer.copy(frame, 5);
   return frame;
+}
+
+/** Mock the Cursor AgentService Run stream; returns the restore function. */
+async function mockCursorAgent(
+  make: (
+    url: string,
+    headers: Record<string, string>,
+    frame: Uint8Array,
+  ) => { chunks: Uint8Array[]; gapMs?: number },
+): Promise<() => void> {
+  const { __setCursorAgentTransports } = await import(
+    "../src/upstream/cursor-agent"
+  );
+  __setCursorAgentTransports({
+    // Auto ("cursor-default") model lookup: empty catalog, keep the alias.
+    unary: async () => ({ status: 200, body: new Uint8Array(0) }),
+    run: async (url, headers, frame) => {
+      const { chunks, gapMs = 0 } = make(url, headers, frame);
+      return {
+        status: 200,
+        headers: {},
+        chunks: (async function* () {
+          for (let i = 0; i < chunks.length; i++) {
+            if (i > 0 && gapMs) await new Promise((r) => setTimeout(r, gapMs));
+            yield chunks[i];
+          }
+        })(),
+        write: () => {},
+        close: () => {},
+      };
+    },
+  });
+  return () => __setCursorAgentTransports(null);
 }
 
 test("accepts x-api-key auth and serves models/admin state", async (t) => {
@@ -1284,26 +1317,18 @@ test("cursor responses proxy converts minimal Connect-RPC stream to Responses SS
     }),
   );
 
-  const { __setCursorTransport } = await import("../src/upstream/cursor-api");
-  __setCursorTransport(async (url, headers, body) => {
-    assert.equal(
-      url,
-      "https://api2.cursor.sh/aiserver.v1.ChatService/StreamUnifiedChatWithTools",
-    );
+  const restoreCursor = await mockCursorAgent((url, headers, frame) => {
+    assert.equal(url, "https://agent.api5.cursor.sh/agent.v1.AgentService/Run");
     assert.equal(headers.Authorization, "Bearer cursor-access");
     assert.equal(headers["Content-Type"], "application/connect+proto");
     assert.equal(headers["Connect-Protocol-Version"], "1");
-    assert.ok(body instanceof Buffer && body.length > 5);
-    return {
-      status: 200,
-      headers: { "content-type": "application/connect+proto" },
-      body: Buffer.from(connectProtoTextFrame("hello from cursor")),
-    };
+    assert.ok(frame.length > 5);
+    return { chunks: [connectProtoTextFrame("hello from cursor")] };
   });
   const server = await startAppWithLoadedRegistry(makeConfig(authDir));
 
   t.after(async () => {
-    __setCursorTransport(null);
+    restoreCursor();
     await stopApp(server);
     fs.rmSync(authDir, { recursive: true, force: true });
   });
@@ -1345,40 +1370,21 @@ test("cursor SSE forwards deltas as soon as upstream HTTP/2 chunks arrive (no wh
     }),
   );
 
-  const { __setCursorTransport } = await import("../src/upstream/cursor-api");
-  // Build a streaming body that emits one Connect frame per chunk, with a
-  // gap between chunks. If callCursorResponses still buffered the whole
-  // upstream response, the second/third frames would only arrive together
-  // at the end and the deltaArrivalTimes timestamps would be tightly
-  // clustered. With a real stream they should be roughly `chunkGapMs`
-  // apart.
+  // One AgentService frame per chunk with a gap between chunks: if the
+  // proxy buffered the whole upstream answer, the deltas would arrive
+  // together at the end instead of roughly `chunkGapMs` apart.
   const chunkGapMs = 60;
-  const frames = [
-    Buffer.from(connectProtoTextFrame("first ")),
-    Buffer.from(connectProtoTextFrame("second ")),
-    Buffer.from(connectProtoTextFrame("third")),
-  ];
-  __setCursorTransport(async () => {
-    let i = 0;
-    const stream = new ReadableStream<Uint8Array>({
-      async pull(controller) {
-        if (i >= frames.length) {
-          controller.close();
-          return;
-        }
-        if (i > 0) await new Promise((r) => setTimeout(r, chunkGapMs));
-        controller.enqueue(new Uint8Array(frames[i++]));
-      },
-    });
-    return {
-      status: 200,
-      headers: { "content-type": "application/connect+proto" },
-      body: stream,
-    };
-  });
+  const restoreCursor = await mockCursorAgent(() => ({
+    chunks: [
+      connectProtoTextFrame("first "),
+      connectProtoTextFrame("second "),
+      connectProtoTextFrame("third"),
+    ],
+    gapMs: chunkGapMs,
+  }));
   const server = await startAppWithLoadedRegistry(makeConfig(authDir));
   t.after(async () => {
-    __setCursorTransport(null);
+    restoreCursor();
     await stopApp(server);
     fs.rmSync(authDir, { recursive: true, force: true });
   });
@@ -1452,15 +1458,14 @@ test("cursor /v1/messages emits Anthropic Messages SSE for bare model names in c
     }),
   );
 
-  const { __setCursorTransport } = await import("../src/upstream/cursor-api");
-  __setCursorTransport(async (_url, _headers, _body) => ({
-    status: 200,
-    headers: { "content-type": "application/connect+proto" },
-    body: Buffer.from(connectProtoTextFrame("hello from cursor")),
+  const restoreCursor = await mockCursorAgent(() => ({
+    chunks: [
+      connectProtoTextFrame("hello from cursor"),
+    ],
   }));
   const server = await startAppWithLoadedRegistry(makeConfig(authDir));
   t.after(async () => {
-    __setCursorTransport(null);
+    restoreCursor();
     await stopApp(server);
     fs.rmSync(authDir, { recursive: true, force: true });
   });
@@ -1506,15 +1511,14 @@ test("cursor /v1/chat/completions streaming emits OpenAI Chat SSE for bare model
     }),
   );
 
-  const { __setCursorTransport } = await import("../src/upstream/cursor-api");
-  __setCursorTransport(async () => ({
-    status: 200,
-    headers: { "content-type": "application/connect+proto" },
-    body: Buffer.from(connectProtoTextFrame("hi from cursor chat")),
+  const restoreCursor = await mockCursorAgent(() => ({
+    chunks: [
+      connectProtoTextFrame("hi from cursor chat"),
+    ],
   }));
   const server = await startAppWithLoadedRegistry(makeConfig(authDir));
   t.after(async () => {
-    __setCursorTransport(null);
+    restoreCursor();
     await stopApp(server);
     fs.rmSync(authDir, { recursive: true, force: true });
   });
@@ -1565,19 +1569,15 @@ test("cursor /v1/chat/completions non-streaming aggregates SSE into chat.complet
     }),
   );
 
-  const { __setCursorTransport } = await import("../src/upstream/cursor-api");
-  // Two text frames so we exercise aggregation.
-  __setCursorTransport(async () => ({
-    status: 200,
-    headers: { "content-type": "application/connect+proto" },
-    body: Buffer.concat([
-      Buffer.from(connectProtoTextFrame("foo")),
-      Buffer.from(connectProtoTextFrame(" bar")),
-    ]),
+  const restoreCursor = await mockCursorAgent(() => ({
+    chunks: [
+      connectProtoTextFrame("foo"),
+      connectProtoTextFrame(" bar"),
+    ],
   }));
   const server = await startAppWithLoadedRegistry(makeConfig(authDir));
   t.after(async () => {
-    __setCursorTransport(null);
+    restoreCursor();
     await stopApp(server);
     fs.rmSync(authDir, { recursive: true, force: true });
   });
@@ -2377,4 +2377,81 @@ test("cursor AgentService: plan refusal is a 400 without cooldown, tokens reach 
   assert.equal(ok.body.choices[0].message.content, "OK");
   assert.equal(ok.body.usage.prompt_tokens, 50);
   assert.equal(ok.body.usage.completion_tokens, 2);
+});
+
+test("cursor non-stream chat returns tool_calls with finish_reason tool_calls", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  saveToken(
+    authDir,
+    makeToken({
+      accessToken: "cursor-access",
+      refreshToken: "cursor-refresh",
+      email: "cursor-tools@example.com",
+      accountUuid: "cursor-machine",
+      provider: "cursor",
+      cursorServiceMachineId: "cursor-machine",
+    }),
+  );
+  const proto = await import("../src/upstream/cursor-proto");
+  const { encodeProtoValue } = await import("../src/upstream/cursor-tools");
+  const f = proto.encodeBytesField;
+  const mcpArgs = proto.concatBytes([
+    f(1, "weather"),
+    f(2, proto.concatBytes([f(1, "city"), f(2, encodeProtoValue("Paris"))])),
+    f(3, "call_1"),
+    f(5, "weather"),
+  ]);
+  let sentFrame: Uint8Array | null = null;
+  const restoreCursor = await mockCursorAgent((_url, _headers, frame) => {
+    sentFrame = frame;
+    return {
+      chunks: [
+        proto.connectFrame(
+          f(2, proto.concatBytes([proto.encodeVarintField(1, 1), f(15, "e"), f(11, mcpArgs)])),
+        ),
+      ],
+    };
+  });
+  const server = await startAppWithLoadedRegistry(makeConfig(authDir));
+  t.after(async () => {
+    restoreCursor();
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const response = await requestJson({
+    server,
+    method: "POST",
+    path: "/v1/chat/completions",
+    headers: { Authorization: "Bearer test-key", "Content-Type": "application/json" },
+    body: {
+      model: "cursor-gpt-5.5",
+      messages: [{ role: "user", content: "Weather in Paris?" }],
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "weather",
+            parameters: { type: "object", properties: { city: { type: "string" } } },
+          },
+        },
+      ],
+      stream: false,
+    },
+  });
+  assert.equal(response.status, 200);
+  const choice = response.body.choices[0];
+  assert.equal(choice.finish_reason, "tool_calls");
+  assert.equal(choice.message.content, null);
+  assert.deepEqual(choice.message.tool_calls, [
+    {
+      id: "call_1",
+      type: "function",
+      function: { name: "weather", arguments: '{"city":"Paris"}' },
+    },
+  ]);
+  assert.ok(
+    Buffer.from(sentFrame!).includes(Buffer.from("weather")),
+    "the tool definition reaches Cursor",
+  );
 });
