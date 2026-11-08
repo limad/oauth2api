@@ -35,9 +35,11 @@ debug: "off"
 # Request fingerprinting — controls how auth2api mimics Claude Code CLI
 # These settings affect the User-Agent, billing header, and fingerprint
 cloaking:
-  # CLI version to impersonate (default: 2.1.88)
+  # CLI version to impersonate (default: the runtime's, 2.1.280 in 0.9.29).
+  # Leave unset: Anthropic version-gates new models ("Claude Code X does not
+  # support this model"), and a pinned value goes stale.
   # This affects User-Agent and the fingerprint in billing-header
-  cli-version: "2.1.88"
+  # cli-version: "2.1.280"
 
   # Entrypoint for billing attribution (default: cli)
   # Claude Code uses: cli, mcp, sdk, etc.

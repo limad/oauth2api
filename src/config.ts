@@ -8,7 +8,7 @@ import yaml from "js-yaml";
  * Controls how auth2api mimics Claude Code CLI's request signature.
  */
 export interface CloakingConfig {
-  /** CLI version to impersonate in User-Agent and fingerprint (default: 2.1.88) */
+  /** CLI version to impersonate in User-Agent and fingerprint (default: 2.1.280) */
   "cli-version"?: string;
   /** Entrypoint value for billing header (default: cli) */
   entrypoint?: string;
@@ -88,7 +88,7 @@ const DEFAULT_RAW: RawConfig = {
   "model-aliases": {},
   "body-limit": "200mb",
   cloaking: {
-    "cli-version": "2.1.88",
+    "cli-version": "2.1.280",
     entrypoint: "cli",
   },
   timeouts: {
