@@ -71,6 +71,12 @@ export interface Provider {
   listModels(): Promise<ModelInfo[]>;
   /** Anthropic-Messages → upstream call. */
   callMessages(opts: UpstreamCallContext): Promise<Response>;
+  /**
+   * Optional, "openai-chat" providers only: Anthropic Messages body in,
+   * Anthropic answer out (src/upstream/chat-adapter.ts). Lets /v1/messages and
+   * /v1/responses serve them like an Anthropic-native provider.
+   */
+  callAnthropicMessages?(opts: UpstreamCallContext): Promise<Response>;
   /** Optional — undefined for codex (no count_tokens analog). */
   callCountTokens?(opts: UpstreamCallContext): Promise<Response>;
   /**

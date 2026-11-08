@@ -9,6 +9,21 @@ import { extractApiKey, hashApiKey } from "../utils/common";
 const BASE_URL = "https://api.anthropic.com";
 const OAUTH_BETA = "oauth-2025-04-20";
 const COMPACT_BETA = "compact-2026-01-12";
+// 1 h prompt-cache TTL, added for clients that send no anthropic-beta of their own
+// when the body uses ttl "1h" (automatic cache, see auto-cache.ts). Clients that
+// send their own betas (Claude Code) are not touched.
+const EXTENDED_CACHE_TTL_BETA = "extended-cache-ttl-2025-04-11";
+
+function usesOneHourCache(body: any): boolean {
+  const has = (blocks: any): boolean =>
+    Array.isArray(blocks) &&
+    blocks.some((b: any) => b?.cache_control?.ttl === "1h" || has(b?.content));
+  return (
+    has(body?.tools) ||
+    has(body?.system) ||
+    (Array.isArray(body?.messages) && body.messages.some((m: any) => has(m?.content)))
+  );
+}
 
 /**
  * Dynamic Anthropic-Beta construction — mirrors Claude Code's utils/betas.ts
@@ -38,9 +53,9 @@ function inferredBetasFromBody(body: any): string[] {
     Array.isArray(edits) &&
     edits.some((edit: any) => edit?.type === "compact_20260112")
   ) {
-    return [COMPACT_BETA];
+    return usesOneHourCache(body) ? [COMPACT_BETA, EXTENDED_CACHE_TTL_BETA] : [COMPACT_BETA];
   }
-  return [];
+  return usesOneHourCache(body) ? [EXTENDED_CACHE_TTL_BETA] : [];
 }
 
 /**
@@ -167,7 +182,7 @@ function buildHeaders(
     if (!betas.includes(OAUTH_BETA)) {
       betas.unshift(OAUTH_BETA);
     }
-    betas.push(...inferredBetas);
+    betas.push(...inferredBetas.filter((b) => b !== EXTENDED_CACHE_TTL_BETA));
     headers["anthropic-beta"] = [...new Set(betas)].join(",");
   } else {
     headers["anthropic-beta"] = [

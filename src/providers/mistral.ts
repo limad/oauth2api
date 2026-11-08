@@ -1,4 +1,5 @@
 import { PKCECodes, TokenData } from "../auth/types";
+import { callChatAsAnthropic } from "../upstream/chat-adapter";
 import { AccountManager } from "../accounts/manager";
 import { RefreshTokenExhaustedError } from "../auth/refresh-errors";
 import {
@@ -70,5 +71,15 @@ export function buildMistralProvider(authDir: string): Provider {
         config: opts.config,
         signal: opts.signal,
       }),
+    callAnthropicMessages: (opts: UpstreamCallContext) =>
+      callChatAsAnthropic(opts.body ?? opts.request.body, (chatBody) =>
+        callMistralChatCompletions({
+          body: chatBody,
+          request: opts.request,
+          account: opts.account,
+          config: opts.config,
+          signal: opts.signal,
+        }),
+      ),
   };
 }

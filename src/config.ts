@@ -56,6 +56,17 @@ export interface StatsConfig {
   enabled: boolean;
 }
 
+export interface PromptCacheConfig {
+  /**
+   * Default true. Claude requests whose client sets no cache_control get
+   * automatic breakpoints (see src/upstream/auto-cache.ts). Set false to send
+   * them as received (only the injected CLI prefix is cached).
+   */
+  auto: boolean;
+  /** Lifetime of the automatic breakpoints: "auto" (default, see auto-cache.ts), "5m" or "1h". */
+  ttl: "auto" | "5m" | "1h";
+}
+
 export type DebugMode = "off" | "errors" | "verbose";
 
 export interface Config {
@@ -76,6 +87,7 @@ export interface Config {
   cloaking: CloakingConfig;
   timeouts: TimeoutConfig;
   stats: StatsConfig;
+  "prompt-cache": PromptCacheConfig;
   debug: DebugMode;
 }
 
@@ -105,6 +117,10 @@ const DEFAULT_RAW: RawConfig = {
   },
   stats: {
     enabled: true,
+  },
+  "prompt-cache": {
+    auto: true,
+    ttl: "auto",
   },
   debug: "off",
 };
@@ -152,10 +168,17 @@ export function loadConfig(configPath?: string): Config {
       cloaking: { ...DEFAULT_RAW.cloaking, ...(parsed.cloaking || {}) },
       timeouts: { ...DEFAULT_RAW.timeouts, ...(parsed.timeouts || {}) },
       stats: { ...DEFAULT_RAW.stats, ...(parsed.stats || {}) },
+      "prompt-cache": {
+        ...DEFAULT_RAW["prompt-cache"],
+        ...(parsed["prompt-cache"] || {}),
+      },
     };
   }
 
   raw.debug = normalizeDebugMode(raw.debug);
+  if (!["auto", "5m", "1h"].includes(String(raw["prompt-cache"]?.ttl))) {
+    raw["prompt-cache"] = { ...raw["prompt-cache"], ttl: "auto" };
+  }
   raw["ollama-facade"] = raw["ollama-facade"] === true;
   raw["expose-models"] = Array.isArray(raw["expose-models"])
     ? raw["expose-models"].map((e) => String(e).trim()).filter(Boolean)

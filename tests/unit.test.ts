@@ -1563,7 +1563,9 @@ test("applyCloaking: injected prefix uses ttl 1h when client blocks are 1h", () 
 });
 
 test("applyCloaking: injected prefix stays 5m when no 1h block is present", () => {
-  const cfg: any = { cloaking: {} };
+  // prompt-cache.ttl "5m": with the default "auto", a client without any
+  // breakpoint gets a 1 h prefix (tests/auto-cache.test.ts).
+  const cfg: any = { cloaking: {}, "prompt-cache": { auto: true, ttl: "5m" } };
   const acct: any = { deviceId: "d", accountUuid: "a" };
   const req: any = { headers: { authorization: "Bearer k" }, body: {} };
   const out = applyCloaking({

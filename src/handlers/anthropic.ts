@@ -1,7 +1,7 @@
 import { Request, Response as ExpressResponse } from "express";
 import { Config, isDebugLevel } from "../config";
 import { extractUsage } from "../accounts/manager";
-import { ProviderRegistry } from "../providers/registry";
+import { ProviderRegistry, anthropicView } from "../providers/registry";
 import { proxyWithRetry } from "../utils/http";
 import { resolveModel } from "../upstream/translator";
 import { handleStreamingResponse } from "../upstream/streaming";
@@ -185,7 +185,7 @@ export function createMessagesHandler(
       }
 
       const model = resolveModel(body.model || "claude-sonnet-4-6");
-      const provider = registry.forModel(model);
+      const provider = anthropicView(registry.forModel(model));
       tagStatsModel(resp, model, provider.id);
       // Send the resolved id upstream: aliases ("haiku", "opus", "at/<id>") are
       // only known to us, so passing body.model through raw gives a 404 upstream.
@@ -281,7 +281,7 @@ export function createCountTokensHandler(
     try {
       const body = req.body;
       const model = resolveModel(body?.model || "claude-sonnet-4-6");
-      const provider = registry.forModel(model);
+      const provider = anthropicView(registry.forModel(model));
       tagStatsModel(resp, model, provider.id);
 
       if (!provider.callCountTokens) {

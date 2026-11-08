@@ -8,6 +8,7 @@ import {
   DEFAULT_CLI_VERSION,
   DEFAULT_ENTRYPOINT,
 } from "./anthropic-api";
+import { applyAutoCache } from "./auto-cache";
 
 /**
  * Fingerprint algorithm — exact replica of Claude Code's utils/fingerprint.ts
@@ -159,6 +160,9 @@ export function applyCloaking(options: CloakingOptions): any {
   // Claude Code CLI clients may already include these; if so, keep the originals.
   // For OpenAI-compatible clients we generate them from scratch.
 
+  // Breakpoints set by the client itself, before anything is injected.
+  const clientBreakpoints = countCacheBreakpoints(body);
+
   const existingSystem = body.system || [];
   const remaining: any[] = Array.isArray(existingSystem)
     ? [...existingSystem]
@@ -201,6 +205,19 @@ export function applyCloaking(options: CloakingOptions): any {
   // from the downstream API key so each user gets a stable, rotating session.
 
   const apiKeyHash = hashApiKey(extractApiKey(request.headers));
+
+  // --- Automatic prompt cache ---
+  // Only for clients that manage no cache themselves (OpenAI formats, simple
+  // Anthropic clients); Claude Code / Claude Desktop keep their own breakpoints.
+  if (clientBreakpoints === 0 && config["prompt-cache"]?.auto !== false) {
+    applyAutoCache(body, {
+      clientSystem: remaining,
+      apiKeyHash,
+      prefixBlock: prefixIdx < 0 ? prefixBlock : undefined,
+      used: countCacheBreakpoints(body),
+      ttl: config["prompt-cache"]?.ttl,
+    });
+  }
 
   let sessionID = request.headers["x-claude-code-session-id"];
   sessionID =
