@@ -56,6 +56,7 @@ function makeConfig(): Config {
       "cli-version": "2.1.88",
       entrypoint: "cli",
       cursor: {
+        "chat-api": "chat",
         "client-version": "cli-test",
         "config-version": "config-test",
       },

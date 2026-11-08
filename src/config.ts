@@ -28,7 +28,14 @@ export interface CloakingConfig {
    * experiments only. Cursor version-gates requests, so keep these overrideable.
    */
   cursor?: {
+    /** Pin a client version. Leave unset: the current release is read from Cursor's update feed. */
     "client-version"?: string;
+    /** Build commit paired with a pinned client-version (x-cursor-client-commit). */
+    "client-commit"?: string;
+    /** "agent" (default): agent.v1.AgentService/Run. "chat": legacy ChatService/StreamUnifiedChatWithTools. */
+    "chat-api"?: "agent" | "chat";
+    /** AgentService origin (default https://agent.api5.cursor.sh). */
+    "agent-service-url"?: string;
     "client-type"?: string;
     "agent-base-url"?: string;
     "api-base-url"?: string;

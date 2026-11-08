@@ -125,14 +125,15 @@ debug: "off" # off | errors | verbose
 - `errors`：记录上游/网络失败信息和上游错误响应正文
 - `verbose`：在 `errors` 基础上，再输出每个请求的方法、路径、状态码和耗时
 
-如果 Cursor 上游版本门禁变化，可以覆盖这些实验性请求头。`agent-base-url` 是 chat host 的兼容别名，目前与 `api-base-url` 都指向 `api2.cursor.sh`：
+Cursor 聊天走 `agent.api5.cursor.sh` 上的 `agent.v1.AgentService/Run`。客户端版本自动从 Cursor 公开的更新源读取（每 6 小时刷新）；固定版本会在该版本被淘汰后被 Cursor 拒绝（"Your version of Cursor is no longer supported"），仅调试时使用：
 
 ```yaml
 cloaking:
   cursor:
-    client-version: "2.3.41"
     client-type: "ide"
-    agent-base-url: "https://api2.cursor.sh"
+    # client-version: "3.29.9"
+    # client-commit: "306d153d51d714882ab7b1bc49649cab624e8a31"
+    # chat-api: "chat"   # 旧的 ChatService 路径
     api-base-url: "https://api2.cursor.sh"
 ```
 
