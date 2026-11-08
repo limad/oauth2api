@@ -110,3 +110,69 @@ test("auto-cache: thinking and empty text blocks never carry the breakpoint", ()
   // the previous user turn (tool_result) is still marked
   assert.ok(out.messages[2].content[0].cache_control);
 });
+
+const ttls = (out: any): string[] => {
+  const all: any[] = [];
+  (out.system ?? []).forEach((b: any) => b.cache_control && all.push(b.cache_control));
+  (out.messages ?? []).forEach((m: any) =>
+    Array.isArray(m.content) && m.content.forEach((b: any) => b.cache_control && all.push(b.cache_control)),
+  );
+  return all.map((c) => c.ttl ?? "5m");
+};
+const cfgTtl = (ttl: string): any => ({ cloaking: {}, "prompt-cache": { auto: true, ttl } });
+const t0 = 1_800_000_000_000;
+
+test("auto-cache ttl auto: agent loop = 1h on prefix and system, 5m on the history", () => {
+  const body = agentTurn();
+  const first = applyCloaking({ request: req(), account: acct, config: cfg(), body });
+  assert.deepEqual(ttls(first), ["1h"]);
+  const out = applyCloaking({ request: req(), account: acct, config: cfg(), body });
+  // order: prefix, client system, previous user turn, last message
+  assert.deepEqual(ttls(out), ["1h", "1h", "5m", "5m"]);
+});
+
+test("auto-cache ttl auto: a turn after a pause of more than 2 min caches the history 1h", async () => {
+  const { applyAutoCache } = await import("../src/upstream/auto-cache");
+  const mk = () => { const b = agentTurn(); return { b, sys: b.system }; };
+  const a = mk();
+  applyAutoCache(a.b, { clientSystem: a.sys, apiKeyHash: "h", used: 0, now: t0 });
+  const b = mk();
+  applyAutoCache(b.b, { clientSystem: b.sys, apiKeyHash: "h", used: 0, now: t0 + 3 * 60_000 });
+  assert.deepEqual(ttls(b.b), ["1h", "1h", "1h"]);
+  // seen 40 min ago still counts (1 h window), beyond 1 h it does not
+  const c = mk();
+  assert.equal(applyAutoCache(c.b, { clientSystem: c.sys, apiKeyHash: "h", used: 0, now: t0 + 43 * 60_000 }), 3);
+  const d = mk();
+  assert.equal(applyAutoCache(d.b, { clientSystem: d.sys, apiKeyHash: "h", used: 0, now: t0 + 110 * 60_000 }), 0);
+});
+
+test("auto-cache ttl 5m / 1h: one lifetime everywhere", () => {
+  applyCloaking({ request: req(), account: acct, config: cfgTtl("5m"), body: agentTurn() });
+  assert.deepEqual(ttls(applyCloaking({ request: req(), account: acct, config: cfgTtl("5m"), body: agentTurn() })), ["5m", "5m", "5m", "5m"]);
+  __resetAutoCache();
+  applyCloaking({ request: req(), account: acct, config: cfgTtl("1h"), body: agentTurn() });
+  assert.deepEqual(ttls(applyCloaking({ request: req(), account: acct, config: cfgTtl("1h"), body: agentTurn() })), ["1h", "1h", "1h", "1h"]);
+});
+
+test("1h cache: beta header added for clients without betas, never for Claude Code's own", async () => {
+  const { callAnthropicMessages } = await import("../src/upstream/anthropic-api");
+  const seenHeaders: any[] = [];
+  const orig = globalThis.fetch;
+  globalThis.fetch = (async (_u: any, init: any) => {
+    seenHeaders.push(init.headers);
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+  try {
+    const config: any = { cloaking: {}, timeouts: { "messages-ms": 1000, "stream-messages-ms": 1000 } };
+    const account: any = { token: { accessToken: "at" } };
+    const body = { model: "claude-opus-5-5", system: [{ type: "text", text: "s", cache_control: { type: "ephemeral", ttl: "1h" } }], messages: [{ role: "user", content: "hi" }] };
+    await callAnthropicMessages({ body, request: { headers: { authorization: "Bearer k" } } as any, account, config });
+    await callAnthropicMessages({ body, request: { headers: { authorization: "Bearer k", "user-agent": "claude-cli/2.1.280 (external, cli)", "anthropic-beta": "oauth-2025-04-20,claude-code-20250219" } } as any, account, config });
+    await callAnthropicMessages({ body: { ...body, system: "s" }, request: { headers: { authorization: "Bearer k" } } as any, account, config });
+    assert.ok(seenHeaders[0]["anthropic-beta"].includes("extended-cache-ttl-2025-04-11"));
+    assert.ok(!seenHeaders[1]["anthropic-beta"].includes("extended-cache-ttl"));
+    assert.ok(!seenHeaders[2]["anthropic-beta"].includes("extended-cache-ttl"));
+  } finally {
+    globalThis.fetch = orig;
+  }
+});

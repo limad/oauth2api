@@ -18,15 +18,32 @@ import crypto from "crypto";
  *   3. last block of the client system prompt: shared by one-shot requests that
  *      reuse the same instructions.
  *
- * Writing a cache entry costs 1.25x the input price and only pays back when a
- * later request repeats the prefix. Breakpoints are therefore only added once
- * the same tools + system prompt (for the same client key and model) have
- * already been seen less than 5 minutes ago (the cache lifetime): a prompt
- * that is never repeated, or that changes every time (a timestamp in the
- * system prompt), is never billed for a write.
+ * Writing a cache entry costs 1.25x the input price (5 min lifetime) or 2x
+ * (1 h) and only pays back when a later request repeats the prefix.
+ * Breakpoints are therefore only added once the same tools + system prompt
+ * (for the same client key and model) were already seen within the cache
+ * lifetime: a prompt that is never repeated, or that changes every time (a
+ * timestamp in the system prompt), is never billed for a write.
+ *
+ * Lifetime (`prompt-cache.ttl`):
+ *   - "auto" (default): 1 h for the stable part (injected prefix, client
+ *     system prompt), shared by every conversation of the client; for the
+ *     conversation, 5 min while turns come quickly (agent loop: each read
+ *     renews the 5 min, and a 1 h write would cost 2x instead of 1.25x on
+ *     every new turn), 1 h once the previous turn came more than 2 min
+ *     earlier (a person answering: a pause longer than 5 min would otherwise
+ *     re-bill the whole history);
+ *   - "5m" / "1h": that lifetime everywhere.
+ * Anthropic refuses a 1 h breakpoint after a 5 min one; the order used here
+ * (prefix, system, then messages) always respects it.
  */
 
-const SEEN_TTL_MS = 5 * 60 * 1000;
+export type CacheTtl = "auto" | "5m" | "1h";
+
+const SHORT_MS = 5 * 60 * 1000;
+const LONG_MS = 60 * 60 * 1000;
+/** Gap between two turns above which the conversation is treated as paced by a person. */
+const HUMAN_GAP_MS = 2 * 60 * 1000;
 const SEEN_MAX = 2000;
 const seen = new Map<string, number>();
 
@@ -35,8 +52,8 @@ export function __resetAutoCache(): void {
   seen.clear();
 }
 
-/** True when this prefix was already sent less than 5 min ago; records it either way. */
-function prefixSeenRecently(key: string, now: number): boolean {
+/** Time since this prefix was last sent (null if never or longer ago than `windowMs`); records it either way. */
+function sinceLastSeen(key: string, now: number, windowMs: number): number | null {
   const last = seen.get(key);
   seen.delete(key);
   seen.set(key, now);
@@ -46,7 +63,11 @@ function prefixSeenRecently(key: string, now: number): boolean {
       if (seen.size <= SEEN_MAX) break;
     }
   }
-  return last !== undefined && now - last < SEEN_TTL_MS;
+  return last !== undefined && now - last < windowMs ? now - last : null;
+}
+
+function control(ttl: "5m" | "1h"): { type: "ephemeral"; ttl?: "1h" } {
+  return ttl === "1h" ? { type: "ephemeral", ttl: "1h" } : { type: "ephemeral" };
 }
 
 /** Blocks that may carry cache_control (thinking blocks may not, empty text may not). */
@@ -56,18 +77,18 @@ function cacheable(block: any): boolean {
   return ["image", "document", "tool_use", "tool_result", "search_result"].includes(block.type);
 }
 
-/** Puts a 5 min breakpoint on the last cacheable block of a message. Returns false if none. */
-function markMessage(msg: any): boolean {
+/** Puts a breakpoint on the last cacheable block of a message. Returns false if none. */
+function markMessage(msg: any, ttl: "5m" | "1h"): boolean {
   if (!msg) return false;
   if (typeof msg.content === "string") {
     if (!msg.content) return false;
-    msg.content = [{ type: "text", text: msg.content, cache_control: { type: "ephemeral" } }];
+    msg.content = [{ type: "text", text: msg.content, cache_control: control(ttl) }];
     return true;
   }
   if (!Array.isArray(msg.content)) return false;
   for (let i = msg.content.length - 1; i >= 0; i--) {
     if (cacheable(msg.content[i])) {
-      msg.content[i] = { ...msg.content[i], cache_control: { type: "ephemeral" } };
+      msg.content[i] = { ...msg.content[i], cache_control: control(ttl) };
       return true;
     }
   }
@@ -79,8 +100,11 @@ export interface AutoCacheOptions {
   clientSystem: any[];
   /** Hash of the downstream API key: one client's prompts never mark another's. */
   apiKeyHash: string;
+  /** Injected CLI prefix block, when the proxy added it (its breakpoint follows the stable-part lifetime). */
+  prefixBlock?: any;
   /** Breakpoints already in the body (injected prefix included). */
   used: number;
+  ttl?: CacheTtl;
   now?: number;
 }
 
@@ -99,12 +123,22 @@ export function applyAutoCache(body: any, opts: AutoCacheOptions): number {
     .update("\0" + JSON.stringify(body.tools ?? null))
     .update("\0" + JSON.stringify(opts.clientSystem))
     .digest("hex");
-  if (!prefixSeenRecently(key, opts.now ?? Date.now())) return 0;
+  const mode: CacheTtl = opts.ttl === "5m" || opts.ttl === "1h" ? opts.ttl : "auto";
+  const stableTtl: "5m" | "1h" = mode === "5m" ? "5m" : "1h";
+  // The injected prefix is the same for every conversation of the client: 1 h
+  // from the first request, before any "seen" check (a few hundred tokens).
+  if (opts.prefixBlock?.cache_control && stableTtl === "1h") {
+    opts.prefixBlock.cache_control = control("1h");
+  }
+  const gap = sinceLastSeen(key, opts.now ?? Date.now(), mode === "5m" ? SHORT_MS : LONG_MS);
+  if (gap === null) return 0;
+  const historyTtl: "5m" | "1h" =
+    mode === "auto" ? (gap > HUMAN_GAP_MS ? "1h" : "5m") : mode;
 
   let free = Math.max(0, 4 - opts.used);
   let added = 0;
   const last = messages.length - 1;
-  if (free > 0 && markMessage(messages[last])) {
+  if (free > 0 && markMessage(messages[last], historyTtl)) {
     free--;
     added++;
   }
@@ -112,7 +146,7 @@ export function applyAutoCache(body: any, opts: AutoCacheOptions): number {
   if (free > 0) {
     for (let i = last - 1; i >= 0; i--) {
       if (messages[i]?.role === "user") {
-        if (markMessage(messages[i])) {
+        if (markMessage(messages[i], historyTtl)) {
           free--;
           added++;
         }
@@ -124,7 +158,7 @@ export function applyAutoCache(body: any, opts: AutoCacheOptions): number {
     for (let i = opts.clientSystem.length - 1; i >= 0; i--) {
       const b = opts.clientSystem[i];
       if (cacheable(b)) {
-        b.cache_control = { type: "ephemeral" };
+        b.cache_control = control(stableTtl);
         added++;
         break;
       }

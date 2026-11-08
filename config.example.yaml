@@ -28,13 +28,18 @@ stats:
 
 # Prompt cache for Claude requests whose client sets no cache_control (OpenAI
 # chat/responses clients, simple Anthropic clients). Once the same tools +
-# system prompt were seen less than 5 min ago, breakpoints are added on the
-# last message, the previous user turn and the client system prompt, so agent
-# loops read their history from cache. Clients with their own breakpoints
-# (Claude Code, Claude Desktop) are left alone. Codex requests always get a
-# stable prompt_cache_key (unless the client sends one).
+# system prompt were seen within the cache lifetime, breakpoints are added on
+# the last message, the previous user turn and the client system prompt, so
+# agent loops read their history from cache. Clients with their own
+# breakpoints (Claude Code, Claude Desktop) are left alone. Codex requests
+# always get a stable prompt_cache_key (unless the client sends one).
+# ttl: auto = 1h on the prefix and system prompt; 5m on the history while turns
+# follow quickly (agent loop), 1h once a turn comes more than 2 min after the
+# previous one (a person answering). "5m" or "1h" = that lifetime everywhere.
+# A 1h write costs 2x the input price, a 5m write 1.25x; reads cost 0.1x.
 prompt-cache:
   auto: true
+  ttl: auto
 
 # Debug logging level:
 # off = no extra logs

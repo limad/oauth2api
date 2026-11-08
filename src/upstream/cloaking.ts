@@ -213,7 +213,9 @@ export function applyCloaking(options: CloakingOptions): any {
     applyAutoCache(body, {
       clientSystem: remaining,
       apiKeyHash,
+      prefixBlock: prefixIdx < 0 ? prefixBlock : undefined,
       used: countCacheBreakpoints(body),
+      ttl: config["prompt-cache"]?.ttl,
     });
   }
 
