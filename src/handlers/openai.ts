@@ -443,6 +443,8 @@ async function proxyCursorChatCompletions(args: {
       let aggregatedReasoning = "";
       let upstreamError: { message: string; type?: string } | null = null;
       let upstreamUsage: any = null;
+      const toolCalls: any[] = [];
+      let finishReason = "stop";
       for await (const { data } of readSseEvents(upstream)) {
         if (!data) continue;
         if (data.error) {
@@ -450,7 +452,14 @@ async function proxyCursorChatCompletions(args: {
           continue;
         }
         if (data.usage) upstreamUsage = data.usage;
+        if (data.choices?.[0]?.finish_reason) {
+          finishReason = data.choices[0].finish_reason;
+        }
         const delta = data.choices?.[0]?.delta;
+        for (const tc of delta?.tool_calls || []) {
+          const { index: _index, ...call } = tc;
+          toolCalls.push(call);
+        }
         if (delta) {
           if (typeof delta.content === "string")
             aggregatedText += delta.content;
@@ -459,7 +468,7 @@ async function proxyCursorChatCompletions(args: {
         }
       }
 
-      if (upstreamError && !aggregatedText && !aggregatedReasoning) {
+      if (upstreamError && !aggregatedText && !aggregatedReasoning && !toolCalls.length) {
         if (!resp.headersSent) {
           resp.status(502).json({
             error: {
@@ -478,15 +487,16 @@ async function proxyCursorChatCompletions(args: {
 
       const message: Record<string, unknown> = {
         role: "assistant",
-        content: aggregatedText,
+        content: aggregatedText || (toolCalls.length ? null : ""),
       };
       if (aggregatedReasoning) message.reasoning_content = aggregatedReasoning;
+      if (toolCalls.length) message.tool_calls = toolCalls;
       const completion = {
         id: `chatcmpl-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`,
         object: "chat.completion",
         created: Math.floor(Date.now() / 1000),
         model,
-        choices: [{ index: 0, message, finish_reason: "stop", logprobs: null }],
+        choices: [{ index: 0, message, finish_reason: finishReason, logprobs: null }],
         usage: upstreamUsage || {
           prompt_tokens: 0,
           completion_tokens: 0,

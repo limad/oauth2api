@@ -32,12 +32,12 @@ export interface CloakingConfig {
     "client-version"?: string;
     /** Build commit paired with a pinned client-version (x-cursor-client-commit). */
     "client-commit"?: string;
-    /** "agent" (default): agent.v1.AgentService/Run. "chat": legacy ChatService/StreamUnifiedChatWithTools. */
-    "chat-api"?: "agent" | "chat";
     /** AgentService origin (default https://agent.api5.cursor.sh). */
     "agent-service-url"?: string;
     "client-type"?: string;
+    /** Ignored since 0.9.32 (was the legacy ChatService host); kept so old configs still load. */
     "agent-base-url"?: string;
+    /** Host of the model list (aiserver.v1.AiService/AvailableModels). */
     "api-base-url"?: string;
     "config-version"?: string;
     timezone?: string;

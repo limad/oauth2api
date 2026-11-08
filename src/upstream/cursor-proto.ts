@@ -86,10 +86,12 @@ export function parseFields(data: Uint8Array): ProtoFieldRaw[] {
       if (len < 0 || pos + len > data.length) break;
       out.push({ field, wireType, bytes: data.slice(pos, pos + len) });
       pos += len;
-    } else if (wireType === 1) {
-      pos += 8;
-    } else if (wireType === 5) {
-      pos += 4;
+    } else if (wireType === 1 || wireType === 5) {
+      // fixed64 / fixed32: keep the raw bytes (doubles in google.protobuf.Value).
+      const size = wireType === 1 ? 8 : 4;
+      if (pos + size > data.length) break;
+      out.push({ field, wireType, bytes: data.slice(pos, pos + size) });
+      pos += size;
     } else {
       break;
     }

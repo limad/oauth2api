@@ -62,7 +62,8 @@ cloaking:
     # openai-beta: "responses=experimental"
 
   # Cursor provider — experimental, reverse-engineered, and not official.
-  # Chat goes to agent.v1.AgentService/Run on agent.api5.cursor.sh. The client
+  # Chat goes to agent.v1.AgentService/Run on agent.api5.cursor.sh; client
+  # function tools are passed to Cursor and their calls returned. The client
   # version is read from Cursor's public update feed (refreshed every 6 h);
   # pinning one makes Cursor refuse the proxy once that release is retired
   # ("Your version of Cursor is no longer supported").
@@ -71,8 +72,7 @@ cloaking:
     # client-version: "3.29.9"   # pin only to debug; pair it with client-commit
     # client-commit: "306d153d51d714882ab7b1bc49649cab624e8a31"
     # agent-service-url: "https://agent.api5.cursor.sh"
-    # chat-api: "chat"   # legacy ChatService path (Auto/composer refused there)
-    # Hosts for the legacy chat path and the model list; agent-base-url is an alias.
+    # Host of the model list.
     api-base-url: "https://api2.cursor.sh"
 
 # Models listed on /v1/models. `*` is a wildcard, a leading `!` excludes. Empty = list everything.

@@ -1,20 +1,9 @@
-import { gunzipSync } from "node:zlib";
 import { createHash } from "node:crypto";
-import http2 from "node:http2";
 import { Request } from "express";
 import { v4 as uuidv4, v5 as uuidv5 } from "uuid";
 import { AccountManager, AvailableAccount } from "../accounts/manager";
 import { Config } from "../config";
 import { withTimeoutSignal } from "../utils/abort";
-import {
-  concatBytes,
-  connectFrame,
-  encodeBytesField,
-  encodeVarintField,
-  extractJsonError,
-  getFieldBytes,
-  parseFields,
-} from "./cursor-proto";
 import type { ConnectError } from "./cursor-proto";
 import { ensureCursorClientVersion, getCursorClientVersion } from "./cursor-version";
 import {
@@ -27,21 +16,19 @@ import {
   resolveAgentModel,
 } from "./cursor-agent";
 import type { CursorTurnUsage } from "./cursor-agent";
+import {
+  agentMessagesFromBody,
+  clientToolsFromBody,
+  CursorToolCall,
+  encodeMcpTools,
+} from "./cursor-tools";
 
+// Model list only; chat goes to AgentService (cursor-agent.ts).
 const DEFAULT_API_BASE_URL = "https://api2.cursor.sh";
-// Chat is reverse-engineered from Cursor desktop: it lives on api2.cursor.sh
-// (HTTP/2, application/connect+proto), not on the agent.api5 hosts. See
-// eisbaw/cursor_api_demo for the cross-checked schema we follow here.
-const CHAT_PATH = "/aiserver.v1.ChatService/StreamUnifiedChatWithTools";
 const MODELS_PATH = "/aiserver.v1.AiService/AvailableModels";
 const UUID_DNS_NAMESPACE = "6ba7b810-9dad-11d1-80b4-00c04fd430c8";
 
 const FALLBACK_MODELS = ["cursor-premium", "cursor-fast", "cursor-composer"];
-
-interface ProtoField {
-  field: number;
-  value: string | number | Uint8Array;
-}
 
 /**
  * Wire format the caller wants for the streamed Cursor response.
@@ -62,205 +49,6 @@ export interface CallCursorResponsesOptions {
   account: AvailableAccount;
   config: Config;
   signal?: AbortSignal;
-}
-
-/**
- * The HTTP/2 transport result. `body` is a stream of raw HTTP/2 data frames
- * — we deliberately do *not* buffer the whole response so the downstream
- * SSE writer can emit deltas as soon as Cursor's first protobuf frame
- * arrives. Tests can hand back a `Buffer`/`Uint8Array` for convenience and
- * the dispatcher will wrap it in a single-chunk `ReadableStream`.
- */
-export interface Http2Result {
-  status: number;
-  headers: Record<string, string>;
-  body: ReadableStream<Uint8Array> | Uint8Array | Buffer;
-}
-
-export type CursorTransport = (
-  url: string,
-  headers: Record<string, string>,
-  body: Buffer,
-  timeoutMs: number,
-  signal?: AbortSignal,
-) => Promise<Http2Result>;
-
-let cursorTransport: CursorTransport = http2Post;
-
-/** Test-only: replace the HTTP/2 transport. Production code should not call this. */
-export function __setCursorTransport(transport: CursorTransport | null): void {
-  cursorTransport = transport ?? http2Post;
-}
-
-function bodyToReadableStream(
-  body: ReadableStream<Uint8Array> | Uint8Array | Buffer,
-): ReadableStream<Uint8Array> {
-  if (body && typeof (body as ReadableStream<Uint8Array>).getReader === "function") {
-    return body as ReadableStream<Uint8Array>;
-  }
-  const bytes =
-    body instanceof Uint8Array
-      ? body
-      : new Uint8Array(body as unknown as ArrayBuffer);
-  return new ReadableStream<Uint8Array>({
-    start(controller) {
-      if (bytes.length > 0) controller.enqueue(bytes);
-      controller.close();
-    },
-  });
-}
-
-/**
- * POST a Connect-RPC payload over HTTP/2 and stream the response back. The
- * promise resolves as soon as the response *headers* arrive — the body is
- * exposed as a `ReadableStream` that pushes each HTTP/2 data frame as it
- * lands. This is what makes `cursorUpstreamToSse` able to forward deltas
- * to the SSE client in real time instead of waiting for the upstream
- * response to terminate.
- */
-function http2Post(
-  url: string,
-  headers: Record<string, string>,
-  body: Buffer,
-  timeoutMs: number,
-  signal?: AbortSignal,
-): Promise<Http2Result> {
-  return new Promise((resolve, reject) => {
-    const parsed = new URL(url);
-    const client = http2.connect(parsed.origin);
-    let headersResolved = false;
-    let status = 0;
-    const responseHeaders: Record<string, string> = {};
-    let bodyController: ReadableStreamDefaultController<Uint8Array> | null = null;
-    let bodyClosed = false;
-
-    const closeBody = (err?: Error) => {
-      if (bodyClosed) return;
-      bodyClosed = true;
-      try {
-        if (err && bodyController) bodyController.error(err);
-        else bodyController?.close();
-      } catch {
-        /* controller already closed */
-      }
-      try {
-        client.close();
-      } catch {
-        /* ignore */
-      }
-    };
-
-    const onAbort = () => {
-      try {
-        req.close(http2.constants.NGHTTP2_CANCEL);
-      } catch {
-        /* ignore */
-      }
-      const err = new Error("request aborted");
-      if (!headersResolved) {
-        headersResolved = true;
-        clearTimeout(headerTimer);
-        client.close();
-        reject(err);
-      } else {
-        closeBody(err);
-      }
-    };
-
-    // Header-arrival deadline only — once headers arrive we clear this timer
-    // and rely on the caller-supplied `signal` (which `callCursorResponses`
-    // wraps in withTimeoutSignal(stream-messages-ms, ...)) to bound the body
-    // phase. Splitting the two lets a stuck TCP connection fail fast at
-    // header time without truncating long thinking-model responses that
-    // legitimately take many minutes to finish streaming.
-    const headerTimer = setTimeout(() => {
-      if (headersResolved) return;
-      headersResolved = true;
-      try {
-        req.close(http2.constants.NGHTTP2_CANCEL);
-      } catch {
-        /* ignore */
-      }
-      client.close();
-      reject(new Error("cursor upstream HTTP/2 request timed out"));
-    }, timeoutMs);
-
-    const h2Headers: http2.OutgoingHttpHeaders = {
-      ":method": "POST",
-      ":path": `${parsed.pathname}${parsed.search}`,
-    };
-    for (const [key, value] of Object.entries(headers)) {
-      h2Headers[key.toLowerCase()] = value;
-    }
-
-    const req = client.request(h2Headers);
-    signal?.addEventListener("abort", onAbort, { once: true });
-
-    client.on("error", (err) => {
-      if (!headersResolved) {
-        headersResolved = true;
-        clearTimeout(headerTimer);
-        reject(err);
-      } else {
-        closeBody(err);
-      }
-    });
-    req.on("error", (err) => {
-      if (!headersResolved) {
-        headersResolved = true;
-        clearTimeout(headerTimer);
-        reject(err);
-      } else {
-        closeBody(err);
-      }
-    });
-    req.on("response", (rspHeaders) => {
-      headersResolved = true;
-      clearTimeout(headerTimer);
-      status = Number(rspHeaders[":status"] || 0);
-      for (const [key, value] of Object.entries(rspHeaders)) {
-        if (key.startsWith(":") || value === undefined) continue;
-        responseHeaders[key] = Array.isArray(value)
-          ? value.join(",")
-          : String(value);
-      }
-
-      const stream = new ReadableStream<Uint8Array>({
-        start(controller) {
-          bodyController = controller;
-          req.on("data", (chunk: Buffer) => {
-            if (bodyClosed) return;
-            try {
-              controller.enqueue(new Uint8Array(chunk));
-            } catch {
-              /* consumer cancelled */
-            }
-          });
-          req.on("end", () => closeBody());
-        },
-        cancel() {
-          try {
-            req.close(http2.constants.NGHTTP2_CANCEL);
-          } catch {
-            /* ignore */
-          }
-          closeBody();
-        },
-      });
-
-      resolve({ status, headers: responseHeaders, body: stream });
-    });
-    req.end(body);
-  });
-}
-
-function encodeField(field: number, value: string | number | Uint8Array): Uint8Array {
-  if (typeof value === "number") return encodeVarintField(field, value);
-  return encodeBytesField(field, value);
-}
-
-function encodeMessage(fields: ProtoField[]): Uint8Array {
-  return concatBytes(fields.map((f) => encodeField(f.field, f.value)));
 }
 
 /**
@@ -343,187 +131,6 @@ function parseModelAliases(input: string | undefined): Record<string, string> {
 
 export function __resolveCursorModel(model: string): string {
   return normaliseModel(model);
-}
-
-interface ChatMessageInput {
-  role: "user" | "assistant" | "system";
-  content: string;
-}
-
-function messagesFromBody(body: any): ChatMessageInput[] {
-  const collected: ChatMessageInput[] = [];
-  const pushText = (
-    role: ChatMessageInput["role"],
-    raw: unknown,
-  ): void => {
-    if (typeof raw === "string") {
-      const trimmed = raw.trim();
-      if (trimmed) collected.push({ role, content: raw });
-      return;
-    }
-    if (Array.isArray(raw)) {
-      const text = raw
-        .map((part: any) => part?.text || part?.input_text || "")
-        .filter(Boolean)
-        .join("\n");
-      if (text) collected.push({ role, content: text });
-    } else if (raw && typeof raw === "object") {
-      // Anthropic system: [{type:"text", text:"…"}] etc.
-      const text = (raw as any).text || (raw as any).input_text || "";
-      if (text) collected.push({ role, content: text });
-    }
-  };
-  // Anthropic-style top-level system prompt (string or content-block array).
-  if (body?.system) pushText("system", body.system);
-
-  if (typeof body?.input === "string") {
-    pushText("user", body.input);
-  } else if (Array.isArray(body?.input)) {
-    for (const item of body.input) {
-      if (typeof item === "string") {
-        pushText("user", item);
-      } else {
-        const role = (item?.role || "user") as ChatMessageInput["role"];
-        pushText(role, item?.content ?? item);
-      }
-    }
-  }
-  if (Array.isArray(body?.messages)) {
-    for (const msg of body.messages) {
-      const role = (msg?.role || "user") as ChatMessageInput["role"];
-      pushText(role, msg?.content);
-    }
-  }
-  if (collected.length === 0) collected.push({ role: "user", content: "" });
-  return collected;
-}
-
-function textFromResponsesInput(body: any): string {
-  return messagesFromBody(body)
-    .map((m) => m.content)
-    .filter(Boolean)
-    .join("\n");
-}
-
-function encodeChatMessage(
-  content: string,
-  role: number,
-  messageId: string,
-  chatModeEnum: number,
-): Uint8Array {
-  return concatBytes([
-    encodeBytesField(1, content),
-    encodeVarintField(2, role),
-    encodeBytesField(13, messageId),
-    encodeVarintField(47, chatModeEnum),
-  ]);
-}
-
-function encodeMessageId(messageId: string, role: number): Uint8Array {
-  return concatBytes([
-    encodeBytesField(1, messageId),
-    encodeVarintField(3, role),
-  ]);
-}
-
-function encodeModelMsg(modelName: string): Uint8Array {
-  return concatBytes([
-    encodeBytesField(1, modelName),
-    encodeBytesField(4, new Uint8Array(0)),
-  ]);
-}
-
-function encodeCursorSetting(): Uint8Array {
-  const unknown6 = concatBytes([
-    encodeBytesField(1, new Uint8Array(0)),
-    encodeBytesField(2, new Uint8Array(0)),
-  ]);
-  return concatBytes([
-    encodeBytesField(1, "cursor\\aisettings"),
-    encodeBytesField(3, new Uint8Array(0)),
-    encodeBytesField(6, unknown6),
-    encodeVarintField(8, 1),
-    encodeVarintField(9, 1),
-  ]);
-}
-
-function encodeMetadata(): Uint8Array {
-  // Reverse-engineered Metadata fields. Keep static so cloaking decisions stay
-  // visible at a single configuration point and not rotated per request.
-  return concatBytes([
-    encodeBytesField(1, process.platform === "win32" ? "windows" : process.platform),
-    encodeBytesField(2, process.arch),
-    encodeBytesField(3, process.version.replace(/^v/, "")),
-    encodeBytesField(4, process.execPath),
-    encodeBytesField(5, new Date().toISOString()),
-  ]);
-}
-
-interface CursorRequestEncoding {
-  bytes: Uint8Array;
-  prompt: string;
-  conversationId: string;
-}
-
-export function encodeCursorAgentRequest(body: any): Uint8Array {
-  return encodeCursorChatRequest(body).bytes;
-}
-
-export function encodeCursorChatRequest(body: any): CursorRequestEncoding {
-  const model = normaliseModel(String(body?.model || "default"));
-  const messages = messagesFromBody(body);
-  const conversationId = uuidv4();
-  const messageEntries: { id: string; role: number }[] = [];
-
-  let request: Uint8Array = new Uint8Array(0);
-  for (const msg of messages) {
-    if (msg.role === "system") continue;
-    const role = msg.role === "assistant" ? 2 : 1;
-    const id = uuidv4();
-    messageEntries.push({ id, role });
-    const message = encodeChatMessage(msg.content, role, id, 2);
-    request = concatBytes([request, encodeBytesField(1, message)]);
-  }
-
-  request = concatBytes([
-    request,
-    encodeVarintField(2, 1),
-    encodeBytesField(3, new Uint8Array(0)),
-    encodeVarintField(4, 1),
-    encodeBytesField(5, encodeModelMsg(model)),
-    encodeBytesField(8, ""),
-    encodeVarintField(13, 1),
-    encodeBytesField(15, encodeCursorSetting()),
-    encodeVarintField(19, 1),
-    encodeBytesField(23, conversationId),
-    encodeBytesField(26, encodeMetadata()),
-    encodeVarintField(27, 1),
-  ]);
-  for (const entry of messageEntries) {
-    request = concatBytes([
-      request,
-      encodeBytesField(30, encodeMessageId(entry.id, entry.role)),
-    ]);
-  }
-  request = concatBytes([
-    request,
-    encodeVarintField(35, 0),
-    encodeVarintField(38, 0),
-    encodeVarintField(46, 2),
-    encodeBytesField(47, ""),
-    encodeVarintField(48, 0),
-    encodeVarintField(49, 0),
-    encodeVarintField(51, 0),
-    encodeVarintField(53, 1),
-    encodeBytesField(54, "agent"),
-  ]);
-
-  const wrapped = encodeBytesField(1, request);
-  return {
-    bytes: connectFrame(wrapped),
-    prompt: messages.map((m) => m.content).join("\n").trim(),
-    conversationId,
-  };
 }
 
 function sha256Hex(input: string): string {
@@ -639,425 +246,6 @@ export function __buildCursorHeaders(
   return headers;
 }
 
-interface CursorFrame {
-  type: number;
-  payload: Uint8Array;
-}
-
-export interface CursorDecodeResult {
-  text: string;
-  reasoning: string;
-  error?: string;
-}
-
-/** Streaming decoder that walks Connect-RPC frames as they arrive. */
-export interface CursorStreamingDecoder {
-  feed(chunk: Uint8Array): { textDelta: string; reasoningDelta: string }[];
-  finish(): { error?: string };
-}
-
-function readConnectFrames(data: Uint8Array): CursorFrame[] {
-  const frames: CursorFrame[] = [];
-  let pos = 0;
-  while (pos + 5 <= data.length) {
-    const type = data[pos];
-    const length = new DataView(
-      data.buffer,
-      data.byteOffset + pos + 1,
-      4,
-    ).getUint32(0, false);
-    pos += 5;
-    if (pos + length > data.length) break;
-    let payload = data.slice(pos, pos + length);
-    pos += length;
-    try {
-      if (type === 1 || type === 3) payload = gunzipSync(payload);
-    } catch {
-      // leave as-is; caller will treat unreadable frames as opaque
-    }
-    frames.push({ type, payload });
-  }
-  return frames;
-}
-
-function isUtfPrintable(text: string): boolean {
-  return /^[\x09\x0a\x0d\x20-\x7e\u00a0-\uffff]+$/.test(text);
-}
-
-function isUuidLike(text: string): boolean {
-  return /^[0-9a-f-]{32,}$/i.test(text);
-}
-
-interface ExtractParts {
-  text: string;
-  reasoning: string;
-}
-
-function looksLikeProtoStart(byte: number): boolean {
-  // Valid proto wire types are 0,1,2,5; field number must be > 0, so first
-  // byte cannot be 0. This filters out plain UTF-8 strings that happen to
-  // appear inside non-proto bytes fields (e.g. raw text in field=1 leafs).
-  const wire = byte & 0x07;
-  return byte !== 0 && (wire === 0 || wire === 1 || wire === 2 || wire === 5);
-}
-
-function extractInnerText(payload: Uint8Array, depth = 0): string {
-  // Walk the inner StreamUnifiedChatResponse-shaped message and pull any
-  // field=1 length-delimited string. Used for both text and reasoning.
-  if (depth > 4) return "";
-  const fields = parseFields(payload);
-  const candidate = fields.find(
-    (f) => f.field === 1 && f.wireType === 2 && f.bytes !== undefined,
-  );
-  if (candidate?.bytes) {
-    const text = new TextDecoder("utf-8", { fatal: false }).decode(candidate.bytes);
-    if (isUtfPrintable(text) && !isUuidLike(text.trim())) return text;
-  }
-  let acc = "";
-  for (const f of fields) {
-    if (f.wireType === 2 && f.bytes && f.bytes.length > 1) {
-      if (!looksLikeProtoStart(f.bytes[0])) continue;
-      try {
-        acc += extractInnerText(f.bytes, depth + 1);
-      } catch {
-        /* ignore */
-      }
-    }
-  }
-  return acc;
-}
-
-/**
- * Pull text + reasoning out of one Cursor protobuf payload.
- *
- * Schema observed against api2.cursor.sh:
- *   StreamUnifiedChatResponseWithTools {
- *     StreamUnifiedChatResponse stream_unified_chat_response = 2 {
- *       string text = 1;                  // assistant final text
- *       Reasoning reasoning = 25 {        // chain-of-thought stream
- *         string text = 1;
- *       }
- *     }
- *   }
- *
- * For "thinking-but-actually-answering" models like composer-2/kimi, the
- * model dumps the full chain-of-thought into field 25 followed by a
- * literal `</think>` separator and then the real answer. We split on that
- * marker and route the tail back to the text channel so SSE clients see a
- * clean answer instead of leaking reasoning into output_text.
- */
-function extractFromPayload(payload: Uint8Array): ExtractParts {
-  const fields = parseFields(payload);
-  let text = "";
-  let reasoning = "";
-  for (const f of fields) {
-    if (f.wireType !== 2 || !f.bytes) continue;
-    if (f.field === 25) {
-      reasoning += extractInnerText(f.bytes);
-    } else if (f.field === 1) {
-      const direct = new TextDecoder("utf-8", { fatal: false }).decode(f.bytes);
-      if (isUtfPrintable(direct) && !isUuidLike(direct.trim())) text += direct;
-    } else if (f.field === 2 || f.bytes.length > 1) {
-      // Recurse into the wrapper layer so we hit the real content fields.
-      if (looksLikeProtoStart(f.bytes[0])) {
-        const sub = extractFromPayload(f.bytes);
-        text += sub.text;
-        reasoning += sub.reasoning;
-      }
-    }
-  }
-  return { text, reasoning };
-}
-
-const THINK_CLOSE_RE = /<\/think>\s*/i;
-
-function splitOnThinkClose(reasoning: string, text: string): ExtractParts {
-  // Composer/Kimi-style: the entire response (CoT + answer) goes into the
-  // reasoning channel; the answer is whatever follows `</think>`.
-  if (text || !THINK_CLOSE_RE.test(reasoning)) {
-    return { text, reasoning };
-  }
-  const idx = reasoning.search(THINK_CLOSE_RE);
-  const matchLen = reasoning.match(THINK_CLOSE_RE)![0].length;
-  return {
-    reasoning: reasoning.slice(0, idx),
-    text: reasoning.slice(idx + matchLen),
-  };
-}
-
-export function decodeCursorResponse(data: Uint8Array): CursorDecodeResult {
-  const frames = readConnectFrames(data);
-  let text = "";
-  let reasoning = "";
-  let error: string | undefined;
-  for (const frame of frames) {
-    if (frame.type === 0 || frame.type === 1) {
-      const parts = extractFromPayload(frame.payload);
-      text += parts.text;
-      reasoning += parts.reasoning;
-    } else if (frame.type === 2 || frame.type === 3) {
-      const err = extractJsonError(frame.payload);
-      if (err) error = err;
-    }
-  }
-  const split = splitOnThinkClose(reasoning, text);
-  return {
-    text: split.text.replace(/^[ \t\r\n]+/, "").replace(/[ \t]+$/, ""),
-    reasoning: split.reasoning.trim(),
-    error,
-  };
-}
-
-export function decodeCursorText(data: Uint8Array, _prompt = ""): string {
-  const result = decodeCursorResponse(data);
-  if (result.text) return result.text;
-  if (result.reasoning) return result.reasoning;
-  if (result.error) return `[cursor] ${result.error}`;
-  return "";
-}
-
-/**
- * Build a stateful decoder for the streaming SSE path. Each `feed()` parses
- * any complete Connect-RPC frames received so far and returns deltas relative
- * to the prior call so the SSE writer can emit `output_text.delta` and
- * `reasoning_summary_text.delta` events in real time.
- */
-export function createCursorStreamingDecoder(): CursorStreamingDecoder {
-  let buffer = new Uint8Array(0);
-  // Reasoning is buffered until we either see `</think>` (split → text), the
-  // first non-empty text delta arrives (flush as reasoning), or the stream
-  // ends (flush as reasoning). This avoids leaking partial CoT into the
-  // reasoning channel for composer/kimi-style models that store the final
-  // answer inside the same field as the chain-of-thought.
-  let pendingReasoning = "";
-  let resolved: "none" | "split" | "reasoning" = "none";
-  let error: string | undefined;
-
-  function maybeSplit(): { reasoningDelta: string; textDelta: string } | null {
-    if (resolved !== "none" || !pendingReasoning) return null;
-    const m = pendingReasoning.match(THINK_CLOSE_RE);
-    if (!m || m.index === undefined) return null;
-    const reasoningPart = pendingReasoning.slice(0, m.index);
-    const textPart = pendingReasoning.slice(m.index + m[0].length);
-    pendingReasoning = "";
-    resolved = "split";
-    return { reasoningDelta: reasoningPart, textDelta: textPart };
-  }
-
-  function flushReasoning(): { reasoningDelta: string; textDelta: string } | null {
-    if (!pendingReasoning) return null;
-    const out = { reasoningDelta: pendingReasoning, textDelta: "" };
-    pendingReasoning = "";
-    resolved = "reasoning";
-    return out;
-  }
-
-  return {
-    feed(chunk: Uint8Array) {
-      const merged = new Uint8Array(buffer.length + chunk.length);
-      merged.set(buffer);
-      merged.set(chunk, buffer.length);
-      buffer = merged;
-
-      const out: { textDelta: string; reasoningDelta: string }[] = [];
-      let pos = 0;
-      while (pos + 5 <= buffer.length) {
-        const type = buffer[pos];
-        const length = new DataView(
-          buffer.buffer,
-          buffer.byteOffset + pos + 1,
-          4,
-        ).getUint32(0, false);
-        if (pos + 5 + length > buffer.length) break;
-        let payload = buffer.slice(pos + 5, pos + 5 + length);
-        pos += 5 + length;
-        try {
-          if (type === 1 || type === 3) payload = gunzipSync(payload);
-        } catch {
-          /* leave compressed bytes alone */
-        }
-        if (type === 0 || type === 1) {
-          const parts = extractFromPayload(payload);
-          let textDelta = parts.text;
-          let reasoningDelta = "";
-          if (parts.reasoning) {
-            if (resolved === "split") {
-              // Once we've resolved the split, the model is just streaming
-              // the rest of its answer through the reasoning channel.
-              textDelta += parts.reasoning;
-            } else if (resolved === "reasoning") {
-              reasoningDelta += parts.reasoning;
-            } else {
-              pendingReasoning += parts.reasoning;
-              const split = maybeSplit();
-              if (split) {
-                reasoningDelta += split.reasoningDelta;
-                textDelta = split.textDelta + textDelta;
-              }
-            }
-          }
-          if (textDelta && resolved === "none") {
-            // First real text delta — commit any pending reasoning as-is.
-            const flushed = flushReasoning();
-            if (flushed) reasoningDelta = flushed.reasoningDelta + reasoningDelta;
-          }
-          if (textDelta || reasoningDelta) out.push({ textDelta, reasoningDelta });
-        } else if (type === 2 || type === 3) {
-          const err = extractJsonError(payload);
-          if (err) error = err;
-        }
-      }
-      buffer = buffer.slice(pos);
-      return out;
-    },
-    finish() {
-      return { error };
-    },
-    // Returns any reasoning still buffered when the stream ends without text.
-    drain(): { reasoningDelta: string } {
-      const flushed = flushReasoning();
-      return { reasoningDelta: flushed?.reasoningDelta || "" };
-    },
-  } as CursorStreamingDecoder & { drain(): { reasoningDelta: string } };
-}
-
-interface ResponsesSseOptions {
-  text: string;
-  reasoning?: string;
-}
-
-function buildResponsesCompletedSse(model: string, opts: ResponsesSseOptions): string {
-  const id = `resp_${uuidv4().replace(/-/g, "")}`;
-  const created = Math.floor(Date.now() / 1000);
-  const reasoningContent =
-    opts.reasoning && opts.reasoning.trim()
-      ? [
-          {
-            type: "reasoning",
-            summary: [{ type: "summary_text", text: opts.reasoning }],
-          },
-        ]
-      : [];
-  const completed = {
-    id,
-    object: "response",
-    created_at: created,
-    status: "completed",
-    model,
-    output: [
-      ...reasoningContent,
-      {
-        type: "message",
-        role: "assistant",
-        content: [{ type: "output_text", text: opts.text }],
-      },
-    ],
-    usage: {
-      input_tokens: 0,
-      output_tokens: 0,
-      total_tokens: 0,
-      input_tokens_details: { cached_tokens: 0 },
-      output_tokens_details: { reasoning_tokens: 0 },
-    },
-  };
-  const events: string[] = [
-    `event: response.created\ndata: ${JSON.stringify({ type: "response.created", response: { id, created_at: created, model } })}\n\n`,
-  ];
-  if (opts.reasoning) {
-    events.push(
-      `event: response.reasoning_summary_text.delta\ndata: ${JSON.stringify({ type: "response.reasoning_summary_text.delta", delta: opts.reasoning })}\n\n`,
-    );
-  }
-  if (opts.text) {
-    events.push(
-      `event: response.output_text.delta\ndata: ${JSON.stringify({ type: "response.output_text.delta", delta: opts.text })}\n\n`,
-    );
-  }
-  events.push(
-    `event: response.completed\ndata: ${JSON.stringify({ type: "response.completed", response: completed })}\n\n`,
-    "data: [DONE]\n\n",
-  );
-  return events.join("");
-}
-
-async function cursorUpstreamToSse(
-  upstream: Response,
-  model: string,
-  format: CursorSseFormat = "openai-responses",
-): Promise<Response> {
-  const reader = upstream.body?.getReader();
-  if (!reader) {
-    const bytes = new Uint8Array(await upstream.arrayBuffer());
-    const decoded = decodeCursorResponse(bytes);
-    if (!decoded.text && !decoded.reasoning && decoded.error) {
-      return errorResponse(decoded.error);
-    }
-    if (format === "anthropic-messages") {
-      return new Response(
-        buildAnthropicCompletedSse(model, {
-          text: decoded.text,
-          reasoning: decoded.reasoning,
-        }),
-        { status: 200, headers: { "Content-Type": "text/event-stream" } },
-      );
-    }
-    if (format === "openai-chat-completions") {
-      // For Chat Completions the non-stream path returns plain JSON, not SSE
-      // — the caller will set the JSON content-type. We still return a
-      // Response so the rest of the proxy plumbing is uniform.
-      return new Response(
-        JSON.stringify(
-          buildOpenaiChatCompletion(model, {
-            text: decoded.text,
-            reasoning: decoded.reasoning,
-          }),
-        ),
-        { status: 200, headers: { "Content-Type": "application/json" } },
-      );
-    }
-    return new Response(
-      buildResponsesCompletedSse(model, {
-        text: decoded.text,
-        reasoning: decoded.reasoning,
-      }),
-      { status: 200, headers: { "Content-Type": "text/event-stream" } },
-    );
-  }
-
-  const decoder = createCursorStreamingDecoder();
-
-  async function* deltaStream(): AsyncGenerator<DeltaItem> {
-    let aggregatedText = "";
-    let aggregatedReasoning = "";
-    while (true) {
-      const { value, done } = await reader!.read();
-      if (done) break;
-      const deltas = decoder.feed(value);
-      for (const d of deltas) {
-        if (d.reasoningDelta) aggregatedReasoning += d.reasoningDelta;
-        if (d.textDelta) aggregatedText += d.textDelta;
-        yield d;
-      }
-    }
-    const drained = (decoder as CursorStreamingDecoder & {
-      drain(): { reasoningDelta: string };
-    }).drain();
-    if (drained.reasoningDelta) {
-      aggregatedReasoning += drained.reasoningDelta;
-      yield { reasoningDelta: drained.reasoningDelta, textDelta: "" };
-    }
-    const fin = decoder.finish();
-    yield {
-      __done: true,
-      aggregatedText,
-      aggregatedReasoning,
-      error: fin.error,
-    } as DeltaTerminator;
-  }
-
-  return deltasToSse(deltaStream(), model, format);
-}
-
 /** Turn a delta source into the SSE wire format the client asked for. */
 function deltasToSse(
   deltas: AsyncGenerator<DeltaItem>,
@@ -1111,8 +299,14 @@ interface DeltaTerminator {
   __done: true;
   aggregatedText: string;
   aggregatedReasoning: string;
+  toolCalls?: CursorToolCall[];
   error?: string;
   usage?: CursorTurnUsage;
+}
+
+/** True when the turn produced nothing a client can use. */
+function isFailedTurn(item: DeltaTerminator): boolean {
+  return !!item.error && !item.aggregatedText && !item.aggregatedReasoning && !item.toolCalls?.length;
 }
 
 const NO_USAGE: CursorTurnUsage = {
@@ -1148,7 +342,12 @@ function chatUsage(u: CursorTurnUsage = NO_USAGE) {
 }
 
 type DeltaItem =
-  | { textDelta: string; reasoningDelta: string; __done?: undefined }
+  | {
+      textDelta: string;
+      reasoningDelta: string;
+      toolCall?: CursorToolCall;
+      __done?: undefined;
+    }
   | DeltaTerminator;
 
 async function* openaiResponsesGenerator(
@@ -1157,13 +356,14 @@ async function* openaiResponsesGenerator(
 ): AsyncGenerator<string> {
   const id = `resp_${uuidv4().replace(/-/g, "")}`;
   const created = Math.floor(Date.now() / 1000);
+  let outputIndex = 1; // 0 is the message item
   yield `event: response.created\ndata: ${JSON.stringify({
     type: "response.created",
     response: { id, created_at: created, model },
   })}\n\n`;
   for await (const item of src) {
     if (item.__done) {
-      if (item.error && !item.aggregatedText && !item.aggregatedReasoning) {
+      if (isFailedTurn(item)) {
         yield `event: response.failed\ndata: ${JSON.stringify({
           type: "response.failed",
           response: { id, error: { message: item.error } },
@@ -1189,11 +389,16 @@ async function* openaiResponsesGenerator(
         model,
         output: [
           ...reasoningOutput,
-          {
-            type: "message",
-            role: "assistant",
-            content: [{ type: "output_text", text: item.aggregatedText }],
-          },
+          ...(item.aggregatedText || !item.toolCalls?.length
+            ? [
+                {
+                  type: "message",
+                  role: "assistant",
+                  content: [{ type: "output_text", text: item.aggregatedText }],
+                },
+              ]
+            : []),
+          ...(item.toolCalls || []).map(responsesFunctionCall),
         ],
         usage: responsesUsage(item.usage),
       };
@@ -1213,7 +418,36 @@ async function* openaiResponsesGenerator(
         delta: item.textDelta,
       })}\n\n`;
     }
+    if (item.toolCall) {
+      const fc = responsesFunctionCall(item.toolCall);
+      const ev = (type: string, data: Record<string, unknown>) =>
+        `event: ${type}\ndata: ${JSON.stringify({ type, output_index: outputIndex, ...data })}\n\n`;
+      yield ev("response.output_item.added", {
+        item: { ...fc, arguments: "", status: "in_progress" },
+      });
+      yield ev("response.function_call_arguments.delta", {
+        item_id: fc.id,
+        delta: fc.arguments,
+      });
+      yield ev("response.function_call_arguments.done", {
+        item_id: fc.id,
+        arguments: fc.arguments,
+      });
+      yield ev("response.output_item.done", { item: fc });
+      outputIndex++;
+    }
   }
+}
+
+function responsesFunctionCall(call: CursorToolCall) {
+  return {
+    type: "function_call",
+    id: `fc_${call.id.replace(/[^A-Za-z0-9_-]/g, "")}`,
+    call_id: call.id,
+    name: call.name,
+    arguments: call.arguments,
+    status: "completed",
+  };
 }
 
 /**
@@ -1267,7 +501,7 @@ async function* anthropicMessagesGenerator(
         yield closeBlock(textIndex);
         textOpen = false;
       }
-      if (item.error && !item.aggregatedText && !item.aggregatedReasoning) {
+      if (isFailedTurn(item)) {
         yield sseEvent("error", {
           type: "error",
           error: { type: "upstream_error", message: item.error },
@@ -1277,7 +511,10 @@ async function* anthropicMessagesGenerator(
       const u = item.usage || NO_USAGE;
       yield sseEvent("message_delta", {
         type: "message_delta",
-        delta: { stop_reason: "end_turn", stop_sequence: null },
+        delta: {
+          stop_reason: item.toolCalls?.length ? "tool_use" : "end_turn",
+          stop_sequence: null,
+        },
         usage: {
           input_tokens: u.input,
           output_tokens: u.output,
@@ -1333,6 +570,33 @@ async function* anthropicMessagesGenerator(
         delta: { type: "text_delta", text: item.textDelta },
       });
     }
+    if (item.toolCall) {
+      if (thinkingOpen) {
+        yield closeBlock(thinkingIndex);
+        thinkingOpen = false;
+      }
+      if (textOpen) {
+        yield closeBlock(textIndex);
+        textOpen = false;
+      }
+      const idx = nextIndex++;
+      yield sseEvent("content_block_start", {
+        type: "content_block_start",
+        index: idx,
+        content_block: {
+          type: "tool_use",
+          id: item.toolCall.id,
+          name: item.toolCall.name,
+          input: {},
+        },
+      });
+      yield sseEvent("content_block_delta", {
+        type: "content_block_delta",
+        index: idx,
+        delta: { type: "input_json_delta", partial_json: item.toolCall.arguments },
+      });
+      yield closeBlock(idx);
+    }
   }
 }
 
@@ -1376,6 +640,7 @@ async function* openaiChatCompletionsGenerator(
   };
 
   let firstChunkSent = false;
+  let toolIndex = 0;
   const sendRoleIfFirst = () => {
     if (firstChunkSent) return "";
     firstChunkSent = true;
@@ -1384,7 +649,7 @@ async function* openaiChatCompletionsGenerator(
 
   for await (const item of src) {
     if (item.__done) {
-      if (item.error && !item.aggregatedText && !item.aggregatedReasoning) {
+      if (isFailedTurn(item)) {
         // Surface upstream errors via the OpenAI streaming-error convention:
         // emit a final chunk with finish_reason="error" so SDKs that don't
         // know about the error sentinel still terminate cleanly, then a
@@ -1397,7 +662,7 @@ async function* openaiChatCompletionsGenerator(
         return;
       }
       if (!firstChunkSent) yield sendRoleIfFirst();
-      yield chunk({}, "stop", chatUsage(item.usage));
+      yield chunk({}, item.toolCalls?.length ? "tool_calls" : "stop", chatUsage(item.usage));
       yield "data: [DONE]\n\n";
       return;
     }
@@ -1409,109 +674,20 @@ async function* openaiChatCompletionsGenerator(
       yield sendRoleIfFirst();
       yield chunk({ content: item.textDelta });
     }
+    if (item.toolCall) {
+      yield sendRoleIfFirst();
+      yield chunk({
+        tool_calls: [
+          {
+            index: toolIndex++,
+            id: item.toolCall.id,
+            type: "function",
+            function: { name: item.toolCall.name, arguments: item.toolCall.arguments },
+          },
+        ],
+      });
+    }
   }
-}
-
-function buildOpenaiChatCompletion(
-  model: string,
-  opts: ResponsesSseOptions,
-): Record<string, unknown> {
-  const id = `chatcmpl-${uuidv4().replace(/-/g, "").slice(0, 24)}`;
-  const created = Math.floor(Date.now() / 1000);
-  const message: Record<string, unknown> = {
-    role: "assistant",
-    content: opts.text || "",
-  };
-  if (opts.reasoning) {
-    // Same convention as the streaming generator: non-standard but the de
-    // facto field name across DeepSeek / OpenRouter / Continue / Cline.
-    message.reasoning_content = opts.reasoning;
-  }
-  return {
-    id,
-    object: "chat.completion",
-    created,
-    model,
-    system_fingerprint: `fp_${uuidv4().replace(/-/g, "").slice(0, 12)}`,
-    choices: [
-      {
-        index: 0,
-        message,
-        finish_reason: "stop",
-        logprobs: null,
-      },
-    ],
-    usage: {
-      prompt_tokens: 0,
-      completion_tokens: 0,
-      total_tokens: 0,
-    },
-  };
-}
-
-function buildAnthropicCompletedSse(
-  model: string,
-  opts: ResponsesSseOptions,
-): string {
-  const messageId = `msg_${uuidv4().replace(/-/g, "")}`;
-  const ev = (event: string, data: unknown) =>
-    `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
-  const events: string[] = [
-    ev("message_start", {
-      type: "message_start",
-      message: {
-        id: messageId,
-        type: "message",
-        role: "assistant",
-        content: [],
-        model,
-        stop_reason: null,
-        stop_sequence: null,
-        usage: { input_tokens: 0, output_tokens: 0 },
-      },
-    }),
-  ];
-  let idx = 0;
-  if (opts.reasoning) {
-    events.push(
-      ev("content_block_start", {
-        type: "content_block_start",
-        index: idx,
-        content_block: { type: "thinking", thinking: "" },
-      }),
-      ev("content_block_delta", {
-        type: "content_block_delta",
-        index: idx,
-        delta: { type: "thinking_delta", thinking: opts.reasoning },
-      }),
-      ev("content_block_stop", { type: "content_block_stop", index: idx }),
-    );
-    idx += 1;
-  }
-  if (opts.text) {
-    events.push(
-      ev("content_block_start", {
-        type: "content_block_start",
-        index: idx,
-        content_block: { type: "text", text: "" },
-      }),
-      ev("content_block_delta", {
-        type: "content_block_delta",
-        index: idx,
-        delta: { type: "text_delta", text: opts.text },
-      }),
-      ev("content_block_stop", { type: "content_block_stop", index: idx }),
-    );
-  }
-  events.push(
-    ev("message_delta", {
-      type: "message_delta",
-      delta: { stop_reason: "end_turn", stop_sequence: null },
-      usage: { output_tokens: 0 },
-    }),
-    ev("message_stop", { type: "message_stop" }),
-  );
-  return events.join("");
 }
 
 function errorResponse(message: string): Response {
@@ -1606,74 +782,38 @@ export async function callCursorResponses(
   if (!cursor["client-version"]) await ensureCursorClientVersion();
   const headers = __buildCursorHeaders(account, config);
 
-  if (cursor["chat-api"] !== "chat") {
-    const baseUrl = (cursor["agent-service-url"] || DEFAULT_AGENT_SERVICE_URL).replace(/\/$/, "");
-    const model = await resolveAgentModel(
-      normaliseModel(publicModel),
-      baseUrl,
-      headers,
-    );
-    const frame = buildAgentRunFrame(
-      messagesFromBody(body),
-      model,
-      body.reasoning_effort || body.reasoning?.effort,
-    );
-    let session: CursorAgentSession;
-    try {
-      session = await openCursorAgentRun(baseUrl, headers, frame, headerTimeoutMs, effectiveSignal);
-    } catch (err: any) {
-      throw new Error(
-        `cursor upstream HTTP/2 request failed: ${err?.message || String(err)}`,
-      );
-    }
-    if (session.status !== 200) {
-      return errorResponse(`HTTP ${session.status}: ${await readAgentError(session)}`);
-    }
-    // Wait for the first item: when Cursor refuses before any output, answer
-    // with a real HTTP error so the retry layer can tell a plan refusal or a
-    // bad request (no account cooldown) from an account or server failure.
-    const deltas = agentSessionDeltas(session);
-    const first = await deltas.next();
-    if (first.done) return errorResponse("Cursor AgentService closed the stream");
-    const head = first.value;
-    if (head.__done && head.error && !head.aggregatedText && !head.aggregatedReasoning) {
-      return cursorAgentErrorResponse(head.error, head.upstreamError);
-    }
-    async function* replay(): AsyncGenerator<DeltaItem> {
-      yield head;
-      yield* deltas;
-    }
-    return deltasToSse(replay(), publicModel, format);
-  }
-
-  // Legacy ChatService path (`chat-api: chat`). Cursor's chat endpoint is
-  // HTTP/2-only and rejects HTTP/1.1 requests with a custom 464 status.
-  // Tests can swap the transport through `__setCursorTransport`.
-  const baseUrl =
-    cursor["agent-base-url"] || cursor["api-base-url"] || DEFAULT_API_BASE_URL;
-  const encoded = encodeCursorChatRequest(body);
-  let h2: Http2Result;
+  const baseUrl = (cursor["agent-service-url"] || DEFAULT_AGENT_SERVICE_URL).replace(/\/$/, "");
+  const model = await resolveAgentModel(normaliseModel(publicModel), baseUrl, headers);
+  const frame = buildAgentRunFrame(
+    agentMessagesFromBody(body),
+    model,
+    body.reasoning_effort || body.reasoning?.effort,
+    encodeMcpTools(clientToolsFromBody(body)),
+  );
+  let session: CursorAgentSession;
   try {
-    h2 = await cursorTransport(
-      `${baseUrl}${CHAT_PATH}`,
-      headers,
-      Buffer.from(encoded.bytes),
-      headerTimeoutMs,
-      effectiveSignal,
-    );
+    session = await openCursorAgentRun(baseUrl, headers, frame, headerTimeoutMs, effectiveSignal);
   } catch (err: any) {
-    throw new Error(
-      `cursor upstream HTTP/2 request failed: ${err?.message || String(err)}`,
-    );
+    throw new Error(`cursor upstream HTTP/2 request failed: ${err?.message || String(err)}`);
   }
-  const bodyStream = bodyToReadableStream(h2.body);
-  const upstream = new Response(bodyStream as unknown as BodyInit, {
-    status: h2.status,
-    headers: h2.headers,
-  });
-
-  if (!upstream.ok) return upstream;
-  return cursorUpstreamToSse(upstream, publicModel, format);
+  if (session.status !== 200) {
+    return errorResponse(`HTTP ${session.status}: ${await readAgentError(session)}`);
+  }
+  // Wait for the first item: when Cursor refuses before any output, answer
+  // with a real HTTP error so the retry layer can tell a plan refusal or a
+  // bad request (no account cooldown) from an account or server failure.
+  const deltas = agentSessionDeltas(session);
+  const first = await deltas.next();
+  if (first.done) return errorResponse("Cursor AgentService closed the stream");
+  const head = first.value;
+  if (head.__done && isFailedTurn(head)) {
+    return cursorAgentErrorResponse(head.error!, head.upstreamError);
+  }
+  async function* replay(): AsyncGenerator<DeltaItem> {
+    yield head;
+    yield* deltas;
+  }
+  return deltasToSse(replay(), publicModel, format);
 }
 
 export async function listCursorModels(

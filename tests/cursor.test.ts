@@ -13,12 +13,7 @@ import { refreshCursorTokens } from "../src/auth/cursor/oauth";
 import {
   __buildCursorHeaders,
   __resolveCursorModel,
-  __setCursorTransport,
   callCursorResponses,
-  createCursorStreamingDecoder,
-  decodeCursorResponse,
-  decodeCursorText,
-  encodeCursorAgentRequest,
   extractCursorModelIds,
   normalizeCursorResponsesBody,
 } from "../src/upstream/cursor-api";
@@ -34,6 +29,7 @@ import {
   runCursorBrowserLogin,
 } from "../src/auth/cursor/browser-oauth";
 import { RefreshTokenExhaustedError } from "../src/auth/refresh-errors";
+import { __setCursorAgentTransports } from "../src/upstream/cursor-agent";
 
 function makeJwt(payload: Record<string, unknown>): string {
   const enc = (obj: Record<string, unknown>) =>
@@ -56,7 +52,6 @@ function makeConfig(): Config {
       "cli-version": "2.1.88",
       entrypoint: "cli",
       cursor: {
-        "chat-api": "chat",
         "client-version": "cli-test",
         "config-version": "config-test",
       },
@@ -94,33 +89,6 @@ function encodeLengthDelim(field: number, payload: Buffer): Buffer {
   const tag = encodeVarint((field << 3) | 2);
   const length = encodeVarint(payload.length);
   return Buffer.concat([tag, length, payload]);
-}
-
-function connectProtoTextFrame(text: string, outerField = 2): Uint8Array {
-  // Mirrors Cursor's StreamUnifiedChatResponseWithTools envelope: an outer
-  // wrapper at field=outerField holds StreamUnifiedChatResponse, whose text
-  // field is at 1. We default to field 2 because that is what api2.cursor.sh
-  // returned in our reverse-engineering captures.
-  const inner = encodeLengthDelim(1, Buffer.from(text, "utf8"));
-  const outer = encodeLengthDelim(outerField, inner);
-  const frame = Buffer.alloc(5 + outer.length);
-  frame[0] = 0;
-  frame.writeUInt32BE(outer.length, 1);
-  outer.copy(frame, 5);
-  return frame;
-}
-
-function connectProtoReasoningFrame(text: string): Uint8Array {
-  // Mirrors a reasoning delta: outer field=2 wraps an inner message that
-  // holds the reasoning string at field=25 → field=1.
-  const reasoningInner = encodeLengthDelim(1, Buffer.from(text, "utf8"));
-  const reasoningWrap = encodeLengthDelim(25, reasoningInner);
-  const outer = encodeLengthDelim(2, reasoningWrap);
-  const frame = Buffer.alloc(5 + outer.length);
-  frame[0] = 0;
-  frame.writeUInt32BE(outer.length, 1);
-  outer.copy(frame, 5);
-  return frame;
 }
 
 function withMockedFetch(
@@ -339,17 +307,6 @@ test("cursor request helpers build headers, frame payloads, and decode text", ()
   assert.equal(headers["x-cursor-client-version"], "cli-test");
   assert.ok(headers["x-cursor-checksum"].includes("machine-id"));
 
-  const request = encodeCursorAgentRequest({
-    model: "cursor-premium",
-    input: "hello cursor",
-  });
-  assert.equal(request[0], 0);
-  assert.ok(request.length > 5);
-
-  assert.equal(
-    decodeCursorText(connectProtoTextFrame("hello from cursor")),
-    "hello from cursor",
-  );
   assert.equal(normalizeCursorResponsesBody({ input: "x" }).stream, true);
 });
 
@@ -386,55 +343,6 @@ test("__resolveCursorModel honours CURSOR_MODEL_ALIASES env override", () => {
     if (prev === undefined) delete process.env.CURSOR_MODEL_ALIASES;
     else process.env.CURSOR_MODEL_ALIASES = prev;
   }
-});
-
-test("cursor decoder splits reasoning from final text", () => {
-  const buf = Buffer.concat([
-    Buffer.from(connectProtoReasoningFrame("thinking step 1\n")),
-    Buffer.from(connectProtoReasoningFrame("thinking step 2")),
-    Buffer.from(connectProtoTextFrame("Answer: 42")),
-  ]);
-  const result = decodeCursorResponse(new Uint8Array(buf));
-  assert.equal(result.reasoning, "thinking step 1\nthinking step 2");
-  assert.equal(result.text, "Answer: 42");
-});
-
-test("cursor decoder routes </think> tail back to text channel for composer-style models", () => {
-  const buf = Buffer.concat([
-    Buffer.from(connectProtoReasoningFrame("Internal reasoning here.\n</")),
-    Buffer.from(connectProtoReasoningFrame("think>\nThe real answer.")),
-  ]);
-  const result = decodeCursorResponse(new Uint8Array(buf));
-  assert.equal(result.reasoning, "Internal reasoning here.");
-  assert.equal(result.text, "The real answer.");
-});
-
-test("cursor streaming decoder buffers reasoning until think-close split", () => {
-  const decoder = createCursorStreamingDecoder();
-  const deltas: { textDelta: string; reasoningDelta: string }[] = [];
-  for (const frame of [
-    connectProtoReasoningFrame("CoT begin "),
-    connectProtoReasoningFrame("more CoT </"),
-    connectProtoReasoningFrame("think>\nfinal "),
-    connectProtoReasoningFrame("answer."),
-  ]) {
-    deltas.push(...decoder.feed(frame));
-  }
-  const reasoning = deltas.map((d) => d.reasoningDelta).join("");
-  const text = deltas.map((d) => d.textDelta).join("");
-  assert.equal(reasoning, "CoT begin more CoT ");
-  assert.equal(text, "final answer.");
-});
-
-test("cursor streaming decoder flushes pending reasoning when text arrives without </think>", () => {
-  const decoder = createCursorStreamingDecoder();
-  const deltas: { textDelta: string; reasoningDelta: string }[] = [];
-  deltas.push(...decoder.feed(connectProtoReasoningFrame("pondering...")));
-  deltas.push(...decoder.feed(connectProtoTextFrame("Hello.")));
-  const reasoning = deltas.map((d) => d.reasoningDelta).join("");
-  const text = deltas.map((d) => d.textDelta).join("");
-  assert.equal(reasoning, "pondering...");
-  assert.equal(text, "Hello.");
 });
 
 test("extractCursorModelIds reads the structured models[] field", () => {
@@ -621,55 +529,39 @@ test("runCursorBrowserLogin invokes onLoginUrl then completes when poll succeeds
   assert.equal(calls, 3);
 });
 
-test("callCursorResponses aborts a stalled body stream after stream-messages-ms", async (t) => {
-  // Reproduces the P2: Cursor edge sends headers but never sends data and
-  // never closes the HTTP/2 stream. Without the withTimeoutSignal wrapper
-  // around options.signal, the body ReadableStream would hang forever and
-  // the client request would never resolve.
-  let cancelCalled = false;
-  __setCursorTransport(async (_url, _headers, _body, _timeoutMs, signal) => {
-    const stream = new ReadableStream<Uint8Array>({
-      start(controller) {
-        // The transport mock listens on the abort signal so it behaves like
-        // the real http2Post: when the caller-supplied timeout fires, it
-        // errors the body stream — letting the consumer's reader.read()
-        // throw so the express handler can clean up.
-        signal?.addEventListener(
-          "abort",
-          () => {
-            cancelCalled = true;
-            try {
-              controller.error(new Error("request aborted"));
-            } catch {
-              /* already errored */
-            }
-          },
-          { once: true },
-        );
-        // Deliberately push nothing and never close — simulate a stalled
-        // upstream that still holds the HTTP/2 stream open.
-      },
-    });
-    return {
+test("callCursorResponses aborts a stalled AgentService stream after stream-messages-ms", async (t) => {
+  // Cursor sends headers, then nothing, and never closes the HTTP/2 stream.
+  // The stream-messages-ms budget must still end the request.
+  let abortSeen = false;
+  __setCursorAgentTransports({
+    run: async (_url, _headers, _frame, _timeoutMs, signal) => ({
       status: 200,
-      headers: { "content-type": "application/connect+proto" },
-      body: stream,
-    };
+      headers: {},
+      chunks: (async function* () {
+        await new Promise<void>((_resolve, reject) => {
+          signal?.addEventListener(
+            "abort",
+            () => {
+              abortSeen = true;
+              reject(new Error("request aborted"));
+            },
+            { once: true },
+          );
+        });
+        yield new Uint8Array(0);
+      })(),
+      write: () => {},
+      close: () => {},
+    }),
   });
-  t.after(() => __setCursorTransport(null));
+  t.after(() => __setCursorAgentTransports(null));
 
-  // AbortSignal.timeout() inside withTimeoutSignal uses an *unreffed* timer
-  // so Node exits the event loop early in unit tests where there is no
-  // other I/O. Production code is fine because the HTTP server's listening
-  // socket keeps the loop alive — for this test we pin it manually.
+  // withTimeoutSignal uses an unreffed timer; keep the loop alive here.
   const keepalive = setInterval(() => {}, 5000);
   t.after(() => clearInterval(keepalive));
 
   const cfg = makeConfig();
-  // 200ms total stream budget — long enough to demonstrate the timer fires
-  // and short enough to keep the test fast.
   cfg.timeouts["stream-messages-ms"] = 200;
-
   const account = {
     token: {
       accessToken: "a",
@@ -678,37 +570,18 @@ test("callCursorResponses aborts a stalled body stream after stream-messages-ms"
       accountUuid: "uuid",
       provider: "cursor" as const,
       cursorServiceMachineId: "m",
-      cursorClientVersion: "cli-test",
     },
   } as any;
 
   const start = Date.now();
-  const upstream = await callCursorResponses({
-    body: { model: "cursor-default", input: "hi", stream: true },
-    account,
-    config: cfg,
-  });
-  // Drain the SSE body — without the timeout fix this never resolves and
-  // the test framework would kill the run after the global timeout.
-  const reader = upstream.body!.getReader();
-  let drained = "";
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (value) drained += new TextDecoder().decode(value);
-    }
-  } catch {
-    /* expected: controller.error on timeout */
-  }
-  const elapsed = Date.now() - start;
-  assert.ok(
-    cancelCalled,
-    "transport abort signal should fire when stream-messages-ms expires",
+  await assert.rejects(
+    callCursorResponses({
+      body: { model: "cursor-gpt-5.5", input: "hi", stream: true },
+      account,
+      config: cfg,
+    } as any),
+    /aborted/,
   );
-  assert.ok(
-    elapsed < 2000,
-    `request should have aborted within ~stream-messages-ms (got ${elapsed}ms). ` +
-      "The body stream is not bounded by the configured stream timeout.",
-  );
+  assert.ok(abortSeen, "the stream-messages-ms timer must abort the transport");
+  assert.ok(Date.now() - start < 2000, "request should end within ~stream-messages-ms");
 });
