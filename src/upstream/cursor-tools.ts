@@ -324,21 +324,24 @@ export function decodeProtoValue(bytes: Uint8Array): unknown {
   return null;
 }
 
-/** AgentRunRequest.mcp_tools: McpTools { repeated McpToolDefinition = 1 }. */
-export function encodeMcpTools(tools: ClientTool[]): Uint8Array {
-  return concatBytes(
-    tools.map((t) =>
-      encodeBytesField(
-        1,
-        concatBytes([
-          encodeBytesField(1, t.name),
-          encodeBytesField(2, t.description),
-          encodeBytesField(3, encodeProtoValue(t.schema)),
-          encodeBytesField(4, "oauth2api"),
-          encodeBytesField(5, t.name),
-        ]),
-      ),
-    ),
+/** MCP server name the client tools are filed under. */
+export const MCP_PROVIDER = "oauth2api";
+
+/**
+ * One McpToolDefinition per client tool { name 1, description 2,
+ * input_schema 3 (Value), provider_identifier 4, tool_name 5 }. They are
+ * served in the request_context answer and the MCP state answer, like
+ * oh-my-pi does; RunRequest.mcp_tools is left empty.
+ */
+export function encodeMcpToolDefinitions(tools: ClientTool[]): Uint8Array[] {
+  return tools.map((t) =>
+    concatBytes([
+      encodeBytesField(1, t.name),
+      encodeBytesField(2, t.description),
+      encodeBytesField(3, encodeProtoValue(t.schema)),
+      encodeBytesField(4, MCP_PROVIDER),
+      encodeBytesField(5, t.name),
+    ]),
   );
 }
 

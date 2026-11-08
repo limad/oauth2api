@@ -20,7 +20,7 @@ import {
   agentMessagesFromBody,
   clientToolsFromBody,
   CursorToolCall,
-  encodeMcpTools,
+  encodeMcpToolDefinitions,
 } from "./cursor-tools";
 
 // Model list only; chat goes to AgentService (cursor-agent.ts).
@@ -788,8 +788,8 @@ export async function callCursorResponses(
     agentMessagesFromBody(body),
     model,
     body.reasoning_effort || body.reasoning?.effort,
-    encodeMcpTools(clientToolsFromBody(body)),
   );
+  const toolDefs = encodeMcpToolDefinitions(clientToolsFromBody(body));
   let session: CursorAgentSession;
   try {
     session = await openCursorAgentRun(baseUrl, headers, frame, headerTimeoutMs, effectiveSignal);
@@ -802,7 +802,7 @@ export async function callCursorResponses(
   // Wait for the first item: when Cursor refuses before any output, answer
   // with a real HTTP error so the retry layer can tell a plan refusal or a
   // bad request (no account cooldown) from an account or server failure.
-  const deltas = agentSessionDeltas(session);
+  const deltas = agentSessionDeltas(session, toolDefs);
   const first = await deltas.next();
   if (first.done) return errorResponse("Cursor AgentService closed the stream");
   const head = first.value;

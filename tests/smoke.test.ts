@@ -2401,9 +2401,7 @@ test("cursor non-stream chat returns tool_calls with finish_reason tool_calls", 
     f(3, "call_1"),
     f(5, "weather"),
   ]);
-  let sentFrame: Uint8Array | null = null;
-  const restoreCursor = await mockCursorAgent((_url, _headers, frame) => {
-    sentFrame = frame;
+  const restoreCursor = await mockCursorAgent(() => {
     return {
       chunks: [
         proto.connectFrame(
@@ -2450,8 +2448,4 @@ test("cursor non-stream chat returns tool_calls with finish_reason tool_calls", 
       function: { name: "weather", arguments: '{"city":"Paris"}' },
     },
   ]);
-  assert.ok(
-    Buffer.from(sentFrame!).includes(Buffer.from("weather")),
-    "the tool definition reaches Cursor",
-  );
 });
