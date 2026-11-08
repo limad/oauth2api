@@ -1401,3 +1401,24 @@ test("codex: prompt_cache_key is stable across the turns of one conversation", (
   assert.equal(withPromptCacheKey({ ...turn1, prompt_cache_key: "mine" }, req).prompt_cache_key, "mine");
   assert.equal((turn1 as any).prompt_cache_key, undefined);
 });
+
+import { callCodexResponses as callCodexForCacheKey } from "../src/upstream/codex-api";
+
+test("codex: the derived cache key is also sent as the session_id header", async () => {
+  let sent: any = null;
+  const restore = withFetchStub(async (_u, init) => {
+    sent = { headers: init?.headers, body: JSON.parse(String(init?.body)) };
+    return new Response("{}", { status: 200 });
+  });
+  try {
+    const request: any = { headers: { authorization: "Bearer k1" }, body: {} };
+    await callCodexForCacheKey({
+      body: { model: "gpt-6-luna", instructions: "sys", input: [{ role: "user", content: "audit" }], stream: true },
+      request, account: makeAvailableAccount(), config: makeCodexConfig(),
+    });
+    assert.ok(sent.body.prompt_cache_key);
+    assert.equal(sent.headers.session_id, sent.body.prompt_cache_key);
+  } finally {
+    restore();
+  }
+});

@@ -1,5 +1,6 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { Request } from "express";
+import { extractApiKey, hashApiKey } from "../utils/common";
 import { Config } from "../config";
 import { AvailableAccount } from "../accounts/manager";
 import { withTimeoutSignal } from "../utils/abort";
@@ -30,6 +31,29 @@ export const V1_INTERNAL_BASES = [
 ];
 
 const SESSION_ID = String(-Math.floor(Math.random() * 2 ** 53));
+
+/**
+ * The real CLI keeps one sessionId per process, i.e. per conversation. A
+ * single proxy process serves many conversations, so one process-wide id
+ * would mix them all. Derive it from what stays fixed during a conversation
+ * (client key, system instruction, first turn), in the CLI's shape: a
+ * negative integer (53 bits, like the random one).
+ */
+export function conversationSessionId(
+  apiKeyHash: string,
+  systemInstruction: unknown,
+  contents: unknown,
+): string {
+  const first = Array.isArray(contents) ? contents[0] : undefined;
+  if (!first) return SESSION_ID;
+  const digest = createHash("sha256")
+    .update(apiKeyHash)
+    .update("\0" + JSON.stringify(systemInstruction ?? null))
+    .update("\0" + JSON.stringify(first))
+    .digest();
+  const n = Number(digest.readBigUInt64BE(0) & ((1n << 53n) - 1n));
+  return String(-Math.max(1, n));
+}
 
 export function methodUrl(base: string, method: string): string {
   return `${base}:${method}`;
@@ -292,7 +316,8 @@ export async function callGeminiMessages(
 
   // Envelope as sent by the real Antigravity CLI 1.2.17 (mitmproxy capture,
   // requestType "agent"): requestId is "agent/<uuid>", userAgent is the fixed
-  // string "antigravity", sessionId is a stable per-process negative integer.
+  // string "antigravity", sessionId is a stable per-process negative integer
+  // (here: per conversation, see conversationSessionId).
   const envelope = {
     project: projectId,
     requestId: `agent/${randomUUID()}`,
@@ -305,7 +330,11 @@ export async function callGeminiMessages(
       tools,
       toolConfig,
       generationConfig,
-      sessionId: SESSION_ID,
+      sessionId: conversationSessionId(
+        hashApiKey(extractApiKey(request.headers)),
+        systemInstruction,
+        contents,
+      ),
     },
   };
 

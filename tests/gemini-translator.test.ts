@@ -443,3 +443,17 @@ test("gemini streaming: usage from the final chunk lands on message_delta", () =
     cache_read_input_tokens: 0,
   });
 });
+
+import { conversationSessionId } from "../src/upstream/gemini-api";
+
+test("antigravity: sessionId is stable per conversation, negative integer like the CLI", () => {
+  const sys = { parts: [{ text: "sys" }] };
+  const turn1 = [{ role: "user", parts: [{ text: "audit" }] }];
+  const turn2 = [...turn1, { role: "model", parts: [{ text: "ok" }] }, { role: "user", parts: [{ text: "next" }] }];
+  const a = conversationSessionId("h1", sys, turn1);
+  assert.match(a, /^-\d+$/);
+  assert.ok(Number.isSafeInteger(Number(a)));
+  assert.equal(conversationSessionId("h1", sys, turn2), a);
+  assert.notEqual(conversationSessionId("h2", sys, turn1), a);
+  assert.notEqual(conversationSessionId("h1", sys, [{ role: "user", parts: [{ text: "other" }] }]), a);
+});

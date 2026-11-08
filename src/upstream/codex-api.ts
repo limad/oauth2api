@@ -185,6 +185,11 @@ export async function callCodexResponses(
     : config.timeouts["messages-ms"];
   const headers = buildHeaders(account, stream, config);
 
+  if (!isCompact && typeof body?.prompt_cache_key === "string" && body.prompt_cache_key) {
+    // Codex CLI sends its conversation id both as prompt_cache_key and as the session_id header.
+    headers.session_id = firstHeader(request, "session_id").trim() || body.prompt_cache_key;
+  }
+
   if (isCompact) {
     headers.Accept = "application/json";
     const seed = compactSessionSeed(request.body ?? body, request);
