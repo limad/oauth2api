@@ -52,6 +52,28 @@ export interface UsageData {
   cacheReadInputTokens: number;
   /** Reasoning-model output tokens (codex Responses output_tokens_details.reasoning_tokens). */
   reasoningOutputTokens: number;
+  /**
+   * Anthropic only: split of cacheCreationInputTokens by cache lifetime
+   * (usage.cache_creation.ephemeral_5m / ephemeral_1h_input_tokens). Set
+   * only when the upstream sent the split; cacheCreationInputTokens stays
+   * the total. A 5 min write and a 1 h write are billed differently.
+   */
+  cacheCreation5mInputTokens?: number;
+  cacheCreation1hInputTokens?: number;
+}
+
+/**
+ * Copy the Anthropic cache-write split (usage.cache_creation) into `usage`
+ * when the upstream sent it. Leaves `usage` untouched otherwise.
+ */
+export function applyCacheCreationSplit(u: any, usage: UsageData): void {
+  const cc = u?.cache_creation;
+  if (!cc || typeof cc !== "object") return;
+  const m5 = Number(cc.ephemeral_5m_input_tokens);
+  const h1 = Number(cc.ephemeral_1h_input_tokens);
+  if (!Number.isFinite(m5) && !Number.isFinite(h1)) return;
+  usage.cacheCreation5mInputTokens = Number.isFinite(m5) ? m5 : 0;
+  usage.cacheCreation1hInputTokens = Number.isFinite(h1) ? h1 : 0;
 }
 
 /**
@@ -85,7 +107,7 @@ export function extractUsage(resp: any): UsageData {
   if (u.input_tokens === undefined && u.prompt_tokens !== undefined) {
     return chatCompletionsUsage(u);
   }
-  return {
+  const usage: UsageData = {
     inputTokens: u.input_tokens || 0,
     outputTokens: u.output_tokens || 0,
     // Anthropic-only field; OpenAI Responses has no equivalent.
@@ -96,6 +118,8 @@ export function extractUsage(resp: any): UsageData {
     // OpenAI Responses only.
     reasoningOutputTokens: u.output_tokens_details?.reasoning_tokens || 0,
   };
+  applyCacheCreationSplit(u, usage);
+  return usage;
 }
 
 interface AccountState {

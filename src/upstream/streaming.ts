@@ -1,5 +1,9 @@
 import { Response as ExpressResponse } from "express";
-import { UsageData, chatCompletionsUsage } from "../accounts/manager";
+import {
+  UsageData,
+  applyCacheCreationSplit,
+  chatCompletionsUsage,
+} from "../accounts/manager";
 
 /**
  * Read an upstream Response as a stream of SSE `(event, data)` pairs.
@@ -97,6 +101,12 @@ export interface StreamResult {
 }
 
 function extractUsageFromSSE(event: string, data: any, usage: UsageData): void {
+  // Anthropic Messages stream — the cache-write split (usage.cache_creation)
+  // comes with message_start; message_delta may repeat it.
+  if (event === "message_start") {
+    applyCacheCreationSplit(data?.message?.usage, usage);
+    return;
+  }
   // Anthropic Messages stream — usage arrives on message_delta.
   if (event === "message_delta") {
     const u = data?.usage;
@@ -105,6 +115,7 @@ function extractUsageFromSSE(event: string, data: any, usage: UsageData): void {
     usage.outputTokens = u.output_tokens || 0;
     usage.cacheCreationInputTokens = u.cache_creation_input_tokens || 0;
     usage.cacheReadInputTokens = u.cache_read_input_tokens || 0;
+    applyCacheCreationSplit(u, usage);
     return;
   }
   // OpenAI Responses stream — usage arrives on response.completed under

@@ -31,6 +31,10 @@ function isFiniteNumber(value: unknown): boolean {
   return typeof value === "number" && Number.isFinite(value);
 }
 
+function isOptionalFiniteNumber(value: unknown): boolean {
+  return value === undefined || isFiniteNumber(value);
+}
+
 function isUsage(value: unknown): boolean {
   if (value === null) return true;
   if (!isObject(value)) return false;
@@ -39,7 +43,9 @@ function isUsage(value: unknown): boolean {
     isFiniteNumber(value.outputTokens) &&
     isFiniteNumber(value.cacheCreationInputTokens) &&
     isFiniteNumber(value.cacheReadInputTokens) &&
-    isFiniteNumber(value.reasoningOutputTokens)
+    isFiniteNumber(value.reasoningOutputTokens) &&
+    isOptionalFiniteNumber(value.cacheCreation5mInputTokens) &&
+    isOptionalFiniteNumber(value.cacheCreation1hInputTokens)
   );
 }
 
