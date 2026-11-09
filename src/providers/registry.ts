@@ -7,6 +7,7 @@ import { buildCopilotProvider } from "./copilot";
 import { buildGeminiProvider } from "./gemini";
 import { buildMistralProvider } from "./mistral";
 import { Provider } from "./types";
+import type { Config } from "../config";
 
 export interface ProviderRegistry {
   get(id: ProviderId): Provider;
@@ -92,4 +93,16 @@ export function anthropicView(provider: Provider): Provider {
     callCountTokens: undefined,
     applyCloaking: undefined,
   };
+}
+
+/** Applies `account-strategy` (and its per-provider overrides) to every provider's account manager. */
+export function applyAccountStrategies(
+  registry: ProviderRegistry,
+  config: Pick<Config, "account-strategy" | "account-strategy-by-provider">,
+): void {
+  for (const p of registry.all()) {
+    const strategy = config["account-strategy-by-provider"][p.id] ?? config["account-strategy"];
+    p.manager.setStrategy(strategy);
+    if (strategy !== "sticky") console.log(`[${p.id}] account strategy: ${strategy}`);
+  }
 }

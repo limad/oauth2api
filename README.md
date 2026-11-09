@@ -61,6 +61,23 @@ model-aliases:
 
 A change needs a restart (or a new process) to take effect.
 
+### Account selection
+
+With several accounts for one provider, `account-strategy` chooses which one serves a request:
+`sticky` (default) keeps an account 20 to 60 minutes, then moves to the next one; `fill-first` always takes the first
+available account (sorted by email), so the others stay untouched until it is paused. Override it per provider
+(`anthropic`, `codex`, `copilot`, `cursor`, `gemini`, `mistral`):
+
+```yaml
+account-strategy: sticky
+account-strategy-by-provider:
+  codex: fill-first
+```
+
+A failing account is paused (backoff) and skipped. On a 429 from a provider whose limits cover the whole account
+(Codex, Copilot, Cursor, Mistral), the pause lasts until the reset the upstream announces (`Retry-After`, Codex
+`resets_at` / `resets_in_seconds`), at most 7 days. Claude and Gemini keep the short backoff: they also limit per model.
+
 ## Node.js requirement
 
 Node.js `>=22` (the major version installed by Jeedom core) is required (`engines.node` in `package.json`). The executable checks the running major version before loading configuration or starting OAuth/server work and exits with an explicit error on older Node.js versions. The release workflow runs on Node.js 22 and smoke-checks the built executable with a temporary, empty auth directory.

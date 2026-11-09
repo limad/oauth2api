@@ -98,5 +98,11 @@ cloaking:
 #   - "!*-low"
 expose-models: []
 
+# Account selection when a provider has several accounts: "sticky" (default, 20-60 min per
+# account) or "fill-first" (always the first available account, sorted by email).
+# account-strategy: sticky
+# account-strategy-by-provider:
+#   codex: fill-first
+
 # Ollama-compatible facade (/api/chat, /api/generate, /api/tags...). Off by default.
 ollama-facade: false
