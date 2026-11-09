@@ -181,6 +181,18 @@ export type AccountResult =
       retryAfterMs: number | null;
     };
 
+/**
+ * How getNextAccount picks an account among the available ones:
+ * - "sticky" (default): keep the current account for 20-60 min, then move to the next one.
+ * - "fill-first": always the first available account (accounts sorted by email), so the
+ *   others stay untouched until it is paused.
+ */
+export type AccountStrategy = "sticky" | "fill-first";
+export const ACCOUNT_STRATEGIES: readonly AccountStrategy[] = ["sticky", "fill-first"];
+
+/** Upper bound of a pause taken from an upstream reset hint (guards against a bogus date). */
+export const MAX_RESET_HINT_MS = 7 * 24 * 60 * 60 * 1000;
+
 const STICKY_MIN_MS = 20 * 60 * 1000; // 20 minutes
 const STICKY_MAX_MS = 60 * 60 * 1000; // 60 minutes
 
@@ -244,12 +256,21 @@ export class AccountManager {
   private refreshFn: RefreshFn;
   private refreshPolicy: RefreshPolicy;
   private reloadPromise: Promise<ReloadStats> | null = null;
+  private strategy: AccountStrategy = "sticky";
 
   constructor(authDir: string, opts: AccountManagerOptions) {
     this.authDir = authDir;
     this.provider = opts.provider;
     this.refreshFn = opts.refresh;
     this.refreshPolicy = opts.refreshPolicy ?? DEFAULT_REFRESH_POLICY;
+  }
+
+  setStrategy(strategy: AccountStrategy): void {
+    this.strategy = strategy;
+  }
+
+  getStrategy(): AccountStrategy {
+    return this.strategy;
   }
 
   load(): void {
@@ -398,9 +419,9 @@ export class AccountManager {
   }
 
   /**
-   * Sticky account selection. Keeps using the same account for STICKY_DURATION_MS
-   * before rotating to the next one. Rotates early only when the current account
-   * enters cooldown (e.g. rate-limited).
+   * Account selection, following the strategy (see AccountStrategy). "sticky" keeps
+   * the same account for 20-60 min before rotating to the next one; "fill-first"
+   * always takes the first available account. Both skip paused accounts at once.
    */
   getNextAccount(accept?: (email: string) => boolean): AccountResult {
     const count = this.accountOrder.length;
@@ -414,6 +435,20 @@ export class AccountManager {
     const allowed = (email: string) => !filter || filter(email);
 
     const now = Date.now();
+
+    if (this.strategy === "fill-first") {
+      const sorted = [...this.accountOrder].sort();
+      for (const email of sorted) {
+        const acct = this.accounts.get(email)!;
+        if (acct.cooldownUntil <= now && allowed(email)) {
+          this.lastUsedIndex = this.accountOrder.indexOf(email);
+          return {
+            account: buildAvailableAccount(this.authDir, email, acct.token, this.provider),
+          };
+        }
+      }
+      return this.unavailableResult(now);
+    }
 
     // Try to keep using the current sticky account
     if (this.lastUsedIndex >= 0 && now < this.stickyUntil) {
@@ -451,7 +486,11 @@ export class AccountManager {
       }
     }
 
-    // All accounts in cooldown — find the most recoverable one
+    return this.unavailableResult(now);
+  }
+
+  /** All accounts in cooldown: reports the most recoverable one. */
+  private unavailableResult(now: number): AccountResult {
     const firstAcct = this.accounts.get(this.accountOrder[0])!;
     let bestKind: AccountFailureKind = firstAcct.lastFailureKind ?? "network";
     let bestRemainingMs = Math.max(0, firstAcct.cooldownUntil - now);
@@ -505,10 +544,16 @@ export class AccountManager {
     }
   }
 
+  /**
+   * `resetAtMs`: when the upstream says the account is usable again (Retry-After, Codex
+   * `resets_at`...). The pause is the longer of the backoff and that date, capped at
+   * MAX_RESET_HINT_MS, so an exhausted account is not called again before it resets.
+   */
   recordFailure(
     email: string,
     kind: AccountFailureKind,
     detail?: string,
+    resetAtMs?: number | null,
   ): void {
     const acct = this.accounts.get(email);
     if (!acct) return;
@@ -520,15 +565,21 @@ export class AccountManager {
     acct.lastError = detail ? `${kind}: ${detail}` : kind;
 
     const { baseMs, maxMs } = FAILURE_BACKOFF[kind];
-    const cooldownMs = Math.min(
+    const backoffMs = Math.min(
       baseMs * 2 ** Math.max(0, acct.failureCount - 1),
       maxMs,
     );
-    acct.cooldownUntil = Date.now() + cooldownMs;
+    const now = Date.now();
+    const hintMs =
+      resetAtMs != null && Number.isFinite(resetAtMs)
+        ? Math.min(Math.max(0, resetAtMs - now), MAX_RESET_HINT_MS)
+        : 0;
+    const cooldownMs = Math.max(backoffMs, hintMs);
+    acct.cooldownUntil = now + cooldownMs;
     console.log(
       `[${this.provider}] account ${email} cooled down for ${Math.round(
         cooldownMs / 1000,
-      )}s (${kind})`,
+      )}s (${kind}${hintMs > backoffMs ? ", upstream reset" : ""})`,
     );
   }
 

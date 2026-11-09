@@ -38,6 +38,60 @@ export function isAmbiguousGoogle429(status: number, body: string): boolean {
   }
 }
 
+/**
+ * Providers whose 429 limits cover the whole account. Claude and Gemini/Antigravity
+ * also have per-model limits: pausing the account until a model's reset would block
+ * the other models, so they keep the short backoff.
+ */
+const ACCOUNT_WIDE_LIMIT_PROVIDERS: ReadonlySet<ProviderId> = new Set<ProviderId>([
+  "codex",
+  "copilot",
+  "cursor",
+  "mistral",
+]);
+
+/**
+ * When the upstream says a rate-limited account is usable again (epoch ms), or null:
+ * `Retry-After` (seconds or HTTP date), Codex `error.resets_at` (epoch seconds) or
+ * `error.resets_in_seconds`. The latest date wins.
+ */
+export function upstreamResetAt(
+  headers: { get(name: string): string | null },
+  body: string,
+  now: number = Date.now(),
+): number | null {
+  const hints: number[] = [];
+  const ra = headers.get("retry-after")?.trim();
+  if (ra) {
+    if (/^\d+(\.\d+)?$/.test(ra)) hints.push(now + parseFloat(ra) * 1000);
+    else hints.push(Date.parse(ra));
+  }
+  let err: any = null;
+  try {
+    err = body ? JSON.parse(body)?.error : null;
+  } catch {
+    err = null;
+  }
+  if (err && typeof err === "object") {
+    if (typeof err.resets_at === "number") hints.push(err.resets_at * 1000);
+    if (typeof err.resets_in_seconds === "number") hints.push(now + err.resets_in_seconds * 1000);
+  }
+  const valid = hints.filter((t) => Number.isFinite(t) && t > now);
+  return valid.length ? Math.max(...valid) : null;
+}
+
+/** Reset hint to pause the account with, only for account-wide limits (see above). */
+export function accountResetAt(
+  provider: ProviderId,
+  status: number,
+  headers: { get(name: string): string | null },
+  body: string,
+  now: number = Date.now(),
+): number | null {
+  if (status !== 429 || !ACCOUNT_WIDE_LIMIT_PROVIDERS.has(provider)) return null;
+  return upstreamResetAt(headers, body, now);
+}
+
 const FAILURE_RESPONSES: Record<
   AccountFailureKind,
   { status: number; message: string }
@@ -357,8 +411,14 @@ export async function proxyWithRetry(
         lastStatus === 429 ||
         lastStatus >= 500
       ) {
-        // Account-level failures: cooldown, may retry on another account.
-        manager.recordFailure(account.token.email, classifyFailure(lastStatus));
+        // Account-level failures: cooldown, may retry on another account. A 429
+        // that says when the account resets pauses it until then (account-wide limits only).
+        manager.recordFailure(
+          account.token.email,
+          classifyFailure(lastStatus),
+          undefined,
+          accountResetAt(manager.provider, lastStatus, upstream.headers, lastErrBody),
+        );
       }
       // Other 4xx (400, 404, 422, …) are client request errors — the account is
       // healthy, the request body is bad. Do NOT cool down the account, and do
