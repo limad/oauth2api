@@ -109,7 +109,7 @@ function extractUsageFromSSE(event: string, data: any, usage: UsageData): void {
   }
   // OpenAI Responses stream — usage arrives on response.completed under
   // response.usage (matches codex-rs/codex-api/src/sse/responses.rs).
-  if (event === "response.completed") {
+  if (event === "response.completed" || event === "response.incomplete") {
     const u = data?.response?.usage;
     if (!u) return;
     usage.inputTokens = u.input_tokens || 0;
@@ -125,6 +125,24 @@ function extractUsageFromSSE(event: string, data: any, usage: UsageData): void {
   if (!event && data?.object === "chat.completion.chunk" && data.usage) {
     Object.assign(usage, chatCompletionsUsage(data.usage));
   }
+}
+
+/**
+ * Upstream events after which the answer is complete. Some upstreams keep
+ * the connection open after them (Codex leaves its Responses stream open
+ * past `response.completed`), and clients like opencode hang up as soon as
+ * they see `[DONE]`: waiting for the upstream to close turned complete
+ * answers into client disconnects without usage.
+ */
+const TERMINAL_EVENTS = new Set([
+  "response.completed", // OpenAI Responses (Codex)
+  "response.incomplete", // OpenAI Responses, partial but normal end
+  "message_stop", // Anthropic Messages (Claude, and adapters emitting it)
+]);
+
+function isTerminalSSE(event: string, payload: string): boolean {
+  // `[DONE]` is the Chat Completions end marker (Copilot, Mistral, Cursor).
+  return payload === "[DONE]" || TERMINAL_EVENTS.has(event);
 }
 
 export async function handleStreamingResponse(
@@ -158,6 +176,9 @@ export async function handleStreamingResponse(
   let currentEvent = "";
   let clientDisconnected = false;
   let completed = false;
+  // Set once a terminal upstream event has been relayed: the answer is
+  // complete, whatever the upstream connection does next.
+  let terminal = false;
 
   const onClose = () => {
     clientDisconnected = true;
@@ -181,7 +202,7 @@ export async function handleStreamingResponse(
     // were written before parsing) but `extractUsageFromSSE` was
     // skipped, undercounting tokens.
     let finished = false;
-    while (!clientDisconnected && !finished) {
+    while (!clientDisconnected && !finished && !terminal) {
       const { done, value } = await reader.read();
 
       if (done) {
@@ -209,37 +230,54 @@ export async function handleStreamingResponse(
         } else if (line.startsWith("data:")) {
           const payload = line.slice(5).trim();
           if (!payload) continue;
+          let data: any;
           try {
-            const data = JSON.parse(payload);
-            extractUsageFromSSE(currentEvent, data, usage);
-            if (options?.onEvent) {
-              const chunks = options.onEvent(currentEvent, data, usage);
-              for (const c of chunks) {
-                if (!clientDisconnected) resp.write(c);
-              }
-            }
+            data = JSON.parse(payload);
           } catch {
-            /* ignore parse errors */
+            data = undefined; // `[DONE]` or a foreign line
+          }
+          if (data !== undefined) {
+            try {
+              extractUsageFromSSE(currentEvent, data, usage);
+              if (options?.onEvent) {
+                const chunks = options.onEvent(currentEvent, data, usage);
+                for (const c of chunks) {
+                  if (!clientDisconnected) resp.write(c);
+                }
+              }
+            } catch {
+              /* ignore translation errors */
+            }
+          }
+          if (isTerminalSSE(currentEvent, payload)) {
+            // Everything up to this event has been written (raw bytes in
+            // pass-through mode, translated chunks otherwise): stop here.
+            terminal = true;
+            break;
           }
         }
       }
     }
-    completed = !clientDisconnected;
+    completed = terminal || !clientDisconnected;
   } catch (err) {
     if (!clientDisconnected) console.error("Stream error:", err);
   } finally {
     resp.off("close", onClose);
+    // Surface stream-extracted usage to the per-request stats slot (set
+    // by server.ts requireApiKey middleware) before ending the response,
+    // so the stats "finish" handler sees it. Skipped on disconnect so a
+    // half-streamed reply doesn't get attributed.
+    if (completed) {
+      const ctx = (resp.locals as any)?.stats;
+      if (ctx) ctx.usage = usage;
+    }
     if (!clientDisconnected) {
       resp.end();
     }
-  }
-
-  // Surface stream-extracted usage to the per-request stats slot (set
-  // by server.ts requireApiKey middleware). Skipped on disconnect so a
-  // half-streamed reply doesn't get attributed.
-  if (completed) {
-    const ctx = (resp.locals as any)?.stats;
-    if (ctx) ctx.usage = usage;
+    if (terminal) {
+      // Do not wait for an upstream that keeps its stream open.
+      reader.cancel().catch(() => {});
+    }
   }
 
   return { completed, clientDisconnected, usage };
