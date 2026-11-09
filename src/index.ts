@@ -8,7 +8,7 @@ import { waitForCallback } from "./auth/callback-server";
 import { importCursorTokenFromLocalStorage } from "./auth/cursor/storage";
 import { runCursorBrowserLogin } from "./auth/cursor/browser-oauth";
 import { runVibeBrowserLogin, mistralTokenFromKey } from "./auth/mistral/vibe-login";
-import { buildRegistry, ProviderRegistry } from "./providers/registry";
+import { applyAccountStrategies, buildRegistry, ProviderRegistry } from "./providers/registry";
 import { createServer } from "./server";
 import { notifyServerReload } from "./utils/notify-reload";
 import { StatsRecorder } from "./stats/recorder";
@@ -188,6 +188,7 @@ async function startServer(): Promise<void> {
 
   const registry = buildRegistry(authDir);
   for (const p of registry.all()) p.manager.load();
+  applyAccountStrategies(registry, config);
 
   const totalAccounts = registry
     .all()

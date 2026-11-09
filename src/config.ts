@@ -2,6 +2,11 @@ import crypto from "crypto";
 import fs from "fs";
 import path from "path";
 import yaml from "js-yaml";
+import type { AccountStrategy } from "./accounts/manager";
+import type { ProviderId } from "./auth/types";
+
+const STRATEGIES: readonly string[] = ["sticky", "fill-first"];
+const PROVIDER_IDS: readonly string[] = ["anthropic", "codex", "copilot", "cursor", "gemini", "mistral"];
 
 /**
  * Cloaking configuration for request fingerprinting.
@@ -83,6 +88,10 @@ export interface Config {
   // Extra model ids (alias -> real id): listed on /v1/models next to their target and rewritten on requests.
   // Lets clients that only accept `claude-*` ids use other models (e.g. `claude-gpt-5.5: gpt-5.5`).
   "model-aliases": Record<string, string>;
+  // How accounts of one provider are picked: "sticky" (default, 20-60 min per account) or "fill-first".
+  "account-strategy": AccountStrategy;
+  // Per-provider override of `account-strategy`, e.g. { codex: "fill-first" }.
+  "account-strategy-by-provider": Partial<Record<ProviderId, AccountStrategy>>;
   "body-limit": string;
   cloaking: CloakingConfig;
   timeouts: TimeoutConfig;
@@ -105,6 +114,8 @@ const DEFAULT_RAW: RawConfig = {
   "allowed-ips": [],
   "expose-models": [],
   "model-aliases": {},
+  "account-strategy": "sticky",
+  "account-strategy-by-provider": {},
   "body-limit": "200mb",
   cloaking: {
     "cli-version": "2.1.280",
@@ -189,6 +200,25 @@ export function loadConfig(configPath?: string): Config {
           Object.entries(raw["model-aliases"] as Record<string, unknown>)
             .map(([k, v]) => [String(k).trim(), String(v).trim()])
             .filter(([k, v]) => k && v),
+        )
+      : {};
+  if (!STRATEGIES.includes(String(raw["account-strategy"]))) {
+    if (raw["account-strategy"] != null && String(raw["account-strategy"]) !== "sticky") {
+      console.warn(`account-strategy "${raw["account-strategy"]}" unknown: using sticky`);
+    }
+    raw["account-strategy"] = "sticky";
+  }
+  const byProvider = raw["account-strategy-by-provider"];
+  raw["account-strategy-by-provider"] =
+    byProvider && typeof byProvider === "object" && !Array.isArray(byProvider)
+      ? Object.fromEntries(
+          Object.entries(byProvider as Record<string, unknown>)
+            .map(([k, v]) => [String(k).trim(), String(v).trim()])
+            .filter(([k, v]) => {
+              const ok = PROVIDER_IDS.includes(k) && STRATEGIES.includes(v);
+              if (!ok) console.warn(`account-strategy-by-provider: ignored entry ${k}: ${v}`);
+              return ok;
+            }),
         )
       : {};
   raw["allowed-ips"] = Array.isArray(raw["allowed-ips"])
