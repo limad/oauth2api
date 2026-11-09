@@ -68,6 +68,7 @@ export async function drainCodexResponsesSse(
   // separately so subsequent argument deltas can find their slot
   // without polluting `toolCalls.values()` with duplicates.
   const itemIdToCallId = new Map<string, string>();
+  const outputIndexToCallId = new Map<number, string>();
   const outputItems: any[] = [];
   let textOut = "";
   let reasoningOut = "";
@@ -100,6 +101,9 @@ export async function drainCodexResponsesSse(
           if (item.id && item.id !== item.call_id) {
             itemIdToCallId.set(item.id, item.call_id);
           }
+          if (typeof data.output_index === "number") {
+            outputIndexToCallId.set(data.output_index, item.call_id);
+          }
         }
         break;
       }
@@ -110,19 +114,34 @@ export async function drainCodexResponsesSse(
         // `/v1/responses` non-stream path can populate the
         // `output` array on the final response (which codex itself
         // leaves empty in `response.completed`).
-        if (data.item) outputItems.push(data.item);
+        const item = data.item;
+        if (item) outputItems.push(item);
+        // Its full arguments also cover calls whose deltas never came.
+        if (item?.type === "function_call" && item.call_id) {
+          let tc = toolCalls.get(item.call_id);
+          if (!tc) {
+            tc = { id: item.call_id, name: item.name, args: "" };
+            toolCalls.set(item.call_id, tc);
+          }
+          tc.args += unsentToolArgs(tc.args, item.arguments);
+        }
         break;
       }
-      case "response.function_call_arguments.delta": {
-        const ref = data.item_id || data.call_id;
-        const callId =
-          ref && toolCalls.has(ref)
-            ? ref
-            : ref
-              ? itemIdToCallId.get(ref)
-              : undefined;
+      case "response.function_call_arguments.delta":
+      case "response.function_call_arguments.done": {
+        const callId = resolveCallId(
+          data,
+          (id) => toolCalls.has(id),
+          itemIdToCallId,
+          outputIndexToCallId,
+        );
         const tc = callId ? toolCalls.get(callId) : null;
-        if (tc && typeof data.delta === "string") tc.args += data.delta;
+        if (!tc) break;
+        if (event.endsWith(".delta")) {
+          if (typeof data.delta === "string") tc.args += data.delta;
+        } else {
+          tc.args += unsentToolArgs(tc.args, data.arguments);
+        }
         break;
       }
       case "response.completed":
@@ -583,6 +602,46 @@ export function responsesToAnthropicMessage(resp: any, model: string): any {
   };
 }
 
+/**
+ * Part of a tool call's full arguments not relayed yet. Codex does not
+ * always stream arguments as `response.function_call_arguments.delta`
+ * (seen with parallel calls): they may only arrive whole in
+ * `response.function_call_arguments.done` or `response.output_item.done`.
+ * Returns "" when everything was already sent, or when the full string
+ * does not extend what was sent (nothing safe to append).
+ */
+export function unsentToolArgs(sent: string, full: unknown): string {
+  if (typeof full !== "string" || full.length <= sent.length) return "";
+  return full.startsWith(sent) ? full.slice(sent.length) : "";
+}
+
+/**
+ * Resolve the public `call_…` id a Responses tool event refers to: by
+ * `call_id`, by the internal `item_id` (`fc_…`), or by `output_index`.
+ */
+function resolveCallId(
+  data: any,
+  known: (id: string) => boolean,
+  itemIdToCallId: Map<string, string>,
+  outputIndexToCallId: Map<number, string>,
+): string | undefined {
+  for (const ref of [
+    data?.item?.call_id,
+    data?.call_id,
+    data?.item_id,
+    data?.item?.id,
+  ]) {
+    if (typeof ref !== "string" || !ref) continue;
+    if (known(ref)) return ref;
+    const mapped = itemIdToCallId.get(ref);
+    if (mapped) return mapped;
+  }
+  if (typeof data?.output_index === "number") {
+    return outputIndexToCallId.get(data.output_index);
+  }
+  return undefined;
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // 5. Responses SSE → OpenAI Chat Completions SSE
 // ─────────────────────────────────────────────────────────────────────
@@ -600,6 +659,9 @@ export interface ResponsesToChatState {
   // public `call_…`. Lets argument deltas resolve their slot
   // without polluting `toolCallIndices` with duplicates.
   itemIdToCallId: Map<string, string>;
+  outputIndexToCallId: Map<number, string>;
+  // Arguments already relayed per `call_…` id.
+  toolArgsSent: Map<string, string>;
   nextToolIndex: number;
   finishReason: string;
   // stream_options.include_usage: emit the OpenAI usage chunk before [DONE].
@@ -619,6 +681,8 @@ export function makeResponsesToChatState(
     rolePrimerSent: false,
     toolCallIndices: new Map(),
     itemIdToCallId: new Map(),
+    outputIndexToCallId: new Map(),
+    toolArgsSent: new Map(),
     nextToolIndex: 0,
     finishReason: "stop",
   };
@@ -648,6 +712,26 @@ function ensureRolePrimer(state: ResponsesToChatState): string[] {
   return [buildChatChunk(state, { role: "assistant", content: "" })];
 }
 
+/** Relay a delta (`full` false) or the unsent rest of the full arguments. */
+function chatToolArgs(
+  state: ResponsesToChatState,
+  callId: string,
+  value: unknown,
+  full: boolean,
+): string[] {
+  const idx = state.toolCallIndices.get(callId);
+  if (idx === undefined || typeof value !== "string") return [];
+  const sent = state.toolArgsSent.get(callId) ?? "";
+  const piece = full ? unsentToolArgs(sent, value) : value;
+  if (!piece) return [];
+  state.toolArgsSent.set(callId, sent + piece);
+  return [
+    buildChatChunk(state, {
+      tool_calls: [{ index: idx, function: { arguments: piece } }],
+    }),
+  ];
+}
+
 export function responsesSSEToChat(
   event: string,
   data: any,
@@ -672,64 +756,66 @@ export function responsesSSEToChat(
       }
       return [];
 
-    case "response.output_item.added": {
+    case "response.output_item.added":
+    case "response.output_item.done": {
       const item = data?.item;
-      if (item?.type === "function_call" && item.call_id) {
-        if (!state.toolCallIndices.has(item.call_id)) {
-          const idx = state.nextToolIndex++;
-          // Codex's `output_item.added` carries both `item.id`
-          // (e.g. `fc_…`) and `item.call_id` (e.g. `call_…`).
-          // Subsequent `function_call_arguments.delta` events
-          // reference the item via `item_id` (= `item.id`), NOT
-          // `item.call_id`. Keep the chat slot map keyed only by
-          // `call_id` and use `itemIdToCallId` for the
-          // delta-event lookup so any future iteration over
-          // `toolCallIndices` doesn't see duplicates.
-          state.toolCallIndices.set(item.call_id, idx);
-          if (item.id && item.id !== item.call_id) {
-            state.itemIdToCallId.set(item.id, item.call_id);
-          }
-          state.finishReason = "tool_calls";
-          return [
-            ...ensureRolePrimer(state),
-            buildChatChunk(state, {
-              tool_calls: [
-                {
-                  index: idx,
-                  id: item.call_id,
-                  type: "function",
-                  function: { name: item.name, arguments: "" },
-                },
-              ],
-            }),
-          ];
+      if (item?.type !== "function_call" || !item.call_id) return [];
+      const out: string[] = [];
+      if (!state.toolCallIndices.has(item.call_id)) {
+        const idx = state.nextToolIndex++;
+        // Codex's `output_item.added` carries both `item.id`
+        // (e.g. `fc_…`) and `item.call_id` (e.g. `call_…`).
+        // Subsequent `function_call_arguments.delta` events
+        // reference the item via `item_id` (= `item.id`), NOT
+        // `item.call_id`. Keep the chat slot map keyed only by
+        // `call_id` and use `itemIdToCallId` for the
+        // delta-event lookup so any future iteration over
+        // `toolCallIndices` doesn't see duplicates.
+        state.toolCallIndices.set(item.call_id, idx);
+        state.toolArgsSent.set(item.call_id, "");
+        if (item.id && item.id !== item.call_id) {
+          state.itemIdToCallId.set(item.id, item.call_id);
         }
+        if (typeof data.output_index === "number") {
+          state.outputIndexToCallId.set(data.output_index, item.call_id);
+        }
+        state.finishReason = "tool_calls";
+        out.push(
+          ...ensureRolePrimer(state),
+          buildChatChunk(state, {
+            tool_calls: [
+              {
+                index: idx,
+                id: item.call_id,
+                type: "function",
+                function: { name: item.name, arguments: "" },
+              },
+            ],
+          }),
+        );
       }
-      return [];
+      // The finished item carries the full arguments: relay what the
+      // deltas did not.
+      out.push(...chatToolArgs(state, item.call_id, item.arguments, true));
+      return out;
     }
 
-    case "response.function_call_arguments.delta": {
-      const ref = data?.item_id || data?.call_id;
-      const callId = ref
-        ? state.toolCallIndices.has(ref)
-          ? ref
-          : state.itemIdToCallId.get(ref)
-        : undefined;
-      const idx = callId ? state.toolCallIndices.get(callId) : undefined;
-      if (idx === undefined || typeof data?.delta !== "string") return [];
-      return [
-        buildChatChunk(state, {
-          tool_calls: [
-            {
-              index: idx,
-              function: { arguments: data.delta },
-            },
-          ],
-        }),
-      ];
+    case "response.function_call_arguments.delta":
+    case "response.function_call_arguments.done": {
+      const callId = resolveCallId(
+        data,
+        (id) => state.toolCallIndices.has(id),
+        state.itemIdToCallId,
+        state.outputIndexToCallId,
+      );
+      if (!callId) return [];
+      return event.endsWith(".delta")
+        ? chatToolArgs(state, callId, data?.delta, false)
+        : chatToolArgs(state, callId, data?.arguments, true);
     }
 
-    case "response.completed": {
+    case "response.completed":
+    case "response.incomplete": {
       const status = data?.response?.status;
       if (status === "incomplete" && state.finishReason === "stop") {
         state.finishReason = "length";
@@ -793,6 +879,7 @@ export interface ResponsesToAnthropicState {
   // `toolBlocks.values()` to emit `content_block_stop` doesn't see
   // duplicate entries.
   itemIdToCallId: Map<string, string>;
+  outputIndexToCallId: Map<number, string>;
   nextBlockIndex: number;
   messageStartSent: boolean;
   stopReason: string;
@@ -813,6 +900,7 @@ export function makeResponsesToAnthropicState(
     textIndex: -1,
     toolBlocks: new Map(),
     itemIdToCallId: new Map(),
+    outputIndexToCallId: new Map(),
     nextBlockIndex: 0,
     messageStartSent: false,
     stopReason: "end_turn",
@@ -873,6 +961,27 @@ function closeOpenBlocks(state: ResponsesToAnthropicState): string[] {
   }
   state.toolBlocks.clear();
   return out;
+}
+
+/** Relay a delta (`full` false) or the unsent rest of the full arguments. */
+function anthropicToolArgs(
+  state: ResponsesToAnthropicState,
+  callId: string,
+  value: unknown,
+  full: boolean,
+): string[] {
+  const tool = state.toolBlocks.get(callId);
+  if (!tool || typeof value !== "string") return [];
+  const piece = full ? unsentToolArgs(tool.argsBuf, value) : value;
+  if (!piece) return [];
+  tool.argsBuf += piece;
+  return [
+    sseEvent("content_block_delta", {
+      type: "content_block_delta",
+      index: tool.index,
+      delta: { type: "input_json_delta", partial_json: piece },
+    }),
+  ];
 }
 
 export function responsesSSEToAnthropic(
@@ -947,10 +1056,12 @@ export function responsesSSEToAnthropic(
       return out;
     }
 
-    case "response.output_item.added": {
+    case "response.output_item.added":
+    case "response.output_item.done": {
       const item = data?.item;
-      if (item?.type === "function_call" && item.call_id) {
-        const out = ensureMessageStart(state);
+      if (item?.type !== "function_call" || !item.call_id) return [];
+      const out = ensureMessageStart(state);
+      if (!state.toolBlocks.has(item.call_id)) {
         // Tool blocks come after text/reasoning per Anthropic convention.
         if (state.thinkingOpen) {
           out.push(
@@ -970,57 +1081,57 @@ export function responsesSSEToAnthropic(
           );
           state.textOpen = false;
         }
-        if (!state.toolBlocks.has(item.call_id)) {
-          const idx = state.nextBlockIndex++;
-          // toolBlocks is keyed by the public `call_id` only so the
-          // close-blocks iteration emits one `content_block_stop`
-          // per tool. The internal `fc_…` id used by subsequent
-          // `function_call_arguments.delta` events is recorded in
-          // a sidecar map (`itemIdToCallId`) so the delta lookup
-          // can resolve back to the same block.
-          const block = { index: idx, name: item.name, argsBuf: "" };
-          state.toolBlocks.set(item.call_id, block);
-          if (item.id && item.id !== item.call_id) {
-            state.itemIdToCallId.set(item.id, item.call_id);
-          }
-          state.stopReason = "tool_use";
-          out.push(
-            sseEvent("content_block_start", {
-              type: "content_block_start",
-              index: idx,
-              content_block: {
-                type: "tool_use",
-                id: item.call_id,
-                name: item.name,
-                input: {},
-              },
-            }),
-          );
+        const idx = state.nextBlockIndex++;
+        // toolBlocks is keyed by the public `call_id` only so the
+        // close-blocks iteration emits one `content_block_stop`
+        // per tool. The internal `fc_…` id used by subsequent
+        // `function_call_arguments.delta` events is recorded in
+        // a sidecar map (`itemIdToCallId`) so the delta lookup
+        // can resolve back to the same block.
+        const block = { index: idx, name: item.name, argsBuf: "" };
+        state.toolBlocks.set(item.call_id, block);
+        if (item.id && item.id !== item.call_id) {
+          state.itemIdToCallId.set(item.id, item.call_id);
         }
-        return out;
+        if (typeof data.output_index === "number") {
+          state.outputIndexToCallId.set(data.output_index, item.call_id);
+        }
+        state.stopReason = "tool_use";
+        out.push(
+          sseEvent("content_block_start", {
+            type: "content_block_start",
+            index: idx,
+            content_block: {
+              type: "tool_use",
+              id: item.call_id,
+              name: item.name,
+              input: {},
+            },
+          }),
+        );
       }
-      return [];
+      // The finished item carries the full arguments: relay what the
+      // deltas did not.
+      out.push(...anthropicToolArgs(state, item.call_id, item.arguments, true));
+      return out;
     }
 
-    case "response.function_call_arguments.delta": {
-      const ref = data?.item_id || data?.call_id;
-      if (!ref) return [];
-      const callId = state.toolBlocks.has(ref)
-        ? ref
-        : state.itemIdToCallId.get(ref);
-      const tool = callId ? state.toolBlocks.get(callId) : undefined;
-      if (!tool || typeof data?.delta !== "string") return [];
-      tool.argsBuf += data.delta;
-      return [
-        sseEvent("content_block_delta", {
-          type: "content_block_delta",
-          index: tool.index,
-          delta: { type: "input_json_delta", partial_json: data.delta },
-        }),
-      ];
+    case "response.function_call_arguments.delta":
+    case "response.function_call_arguments.done": {
+      const callId = resolveCallId(
+        data,
+        (id) => state.toolBlocks.has(id),
+        state.itemIdToCallId,
+        state.outputIndexToCallId,
+      );
+      if (!callId) return [];
+      return event.endsWith(".delta")
+        ? anthropicToolArgs(state, callId, data?.delta, false)
+        : anthropicToolArgs(state, callId, data?.arguments, true);
     }
 
-    case "response.completed": {
+    case "response.completed":
+    case "response.incomplete": {
       const r = data?.response;
       if (r?.usage) {
         const u = responsesUsageToAnthropic(r.usage);
