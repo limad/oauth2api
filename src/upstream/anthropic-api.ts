@@ -5,6 +5,7 @@ import { CloakingConfig, Config } from "../config";
 import { AvailableAccount } from "../accounts/manager";
 import { withTimeoutSignal } from "../utils/abort";
 import { extractApiKey, hashApiKey } from "../utils/common";
+import { normalizeClaudeToolPropertyNames } from "./tool-property-names";
 
 const BASE_URL = "https://api.anthropic.com";
 const OAUTH_BETA = "oauth-2025-04-20";
@@ -233,7 +234,7 @@ export async function callAnthropicMessages(
   options: CallMessagesOptions,
 ): Promise<Response> {
   const { request, account, config, structured } = options;
-  const body = options.body ?? request.body;
+  const body = normalizeClaudeToolPropertyNames(options.body ?? request.body);
   const url = `${BASE_URL}/v1/messages?beta=true`;
   const stream = !!body.stream;
   const model = body.model || "claude-sonnet-4-6";
@@ -274,7 +275,7 @@ export async function callAnthropicCountTokens(
   options: CallCountTokensOptions,
 ): Promise<Response> {
   const { request, account, config } = options;
-  const body = request.body ?? {};
+  const body = normalizeClaudeToolPropertyNames(request.body ?? {});
   const url = `${BASE_URL}/v1/messages/count_tokens?beta=true`;
   const model = body?.model || "claude-sonnet-4-6";
   const apiKeyHash = hashApiKey(extractApiKey(request.headers));
