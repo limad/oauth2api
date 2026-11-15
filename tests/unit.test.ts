@@ -800,7 +800,7 @@ test("openaiToAnthropic translates response_format json_schema", () => {
     },
   });
   assert.equal(result.output_config.format.type, "json_schema");
-  assert.equal(result.output_config.format.name, "test");
+  assert.equal(result.output_config.format.name, undefined, "Anthropic refuses format.name");
 });
 
 test("openaiToAnthropic translates tool role messages", () => {
