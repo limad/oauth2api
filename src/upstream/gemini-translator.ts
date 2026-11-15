@@ -133,14 +133,28 @@ const UNSUPPORTED_SCHEMA_KEYS = new Set([
   "patternProperties",
   "exclusiveMinimum",
   "exclusiveMaximum",
+  // Annotations some tool generators emit (zod `~optional`, OpenAPI, VS Code):
+  // no meaning for the model, rejected as "Unknown name" (9router cdcd09cc, #4283).
+  "optional",
+  "~optional",
+  "deprecated",
+  "readOnly",
+  "writeOnly",
+  "errorMessage",
+  "markdownDescription",
 ]);
+
+/** Vendor extensions (`x-*`) are annotations too. */
+function isUnsupportedSchemaKey(key: string): boolean {
+  return UNSUPPORTED_SCHEMA_KEYS.has(key) || key.startsWith("x-");
+}
 
 function sanitizeSchema(schema: any): any {
   if (Array.isArray(schema)) return schema.map(sanitizeSchema);
   if (!schema || typeof schema !== "object") return schema;
   const out: any = {};
   for (const [key, value] of Object.entries(schema)) {
-    if (UNSUPPORTED_SCHEMA_KEYS.has(key)) continue;
+    if (isUnsupportedSchemaKey(key)) continue;
     // `properties` maps property names to schemas: the names themselves are
     // free text (a property may be called "const"), only the values are schemas.
     if (key === "properties" && value && typeof value === "object" && !Array.isArray(value)) {

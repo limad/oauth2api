@@ -5,8 +5,8 @@ const MODELS_PATH = "/codex/models";
 const CACHE_TTL_MS = 5 * 60 * 1000; // matches codex-rs/models-manager DEFAULT_MODEL_CACHE_TTL
 // The backend validates client_version as plain semver (a "name/x.y.z" string
 // is rejected with 400 "Invalid client_version format"); mimic a codex-cli release.
-// 0.163.0 is required for gpt-6-luna and newer model listing.
-const CLIENT_VERSION = "0.163.0";
+// 0.167.1 is required for gpt-6.1-sol (0.163.0 for gpt-6-luna) and newer model listing.
+const CLIENT_VERSION = "0.167.1";
 
 // Static fallback used when no account is loaded or the upstream /codex/models
 // call fails. User-confirmed list of models currently accepted by the
