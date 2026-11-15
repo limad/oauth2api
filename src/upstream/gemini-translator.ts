@@ -66,7 +66,18 @@ const PLACEHOLDER_THOUGHT_SIGNATURE = "skip_thought_signature_validator";
 
 // ── Shared: reasoning effort (Anthropic thinking) → Gemini thinkingConfig ──
 
-function applyThinkingConfig(generationConfig: any, thinking: any): void {
+// Claude adaptive thinking effort → Gemini thinkingBudget (same scale as the
+// chat translator's reasoning_effort budgets). No effort = Claude's default, high.
+const ADAPTIVE_EFFORT_TO_BUDGET: Record<string, number> = {
+  minimal: 512,
+  low: 1024,
+  medium: 8192,
+  high: 24576,
+  xhigh: 32768,
+  max: 32768,
+};
+
+function applyThinkingConfig(generationConfig: any, thinking: any, effort?: unknown): void {
   if (!thinking) return;
   if (thinking.type === "disabled") {
     generationConfig.thinkingConfig = { thinkingBudget: 0 };
@@ -76,6 +87,27 @@ function applyThinkingConfig(generationConfig: any, thinking: any): void {
     generationConfig.thinkingConfig = {
       thinkingBudget: thinking.budget_tokens || 8192,
       includeThoughts: true,
+    };
+    return;
+  }
+  // Claude 5.x clients (Claude Code on an alias such as haiku → Gemini) send
+  // `thinking: {type: "adaptive"}` + `output_config.effort`; it used to be
+  // ignored, leaving Gemini's default thinking and no thoughts returned
+  // (CLIProxyAPI gemini_claude_request.go). The budget stays under half of
+  // maxOutputTokens, which Gemini thinking tokens count against; below 512 the
+  // request keeps Gemini's default, as before.
+  if (thinking.type === "adaptive" || thinking.type === "auto") {
+    const key = typeof effort === "string" ? effort.trim().toLowerCase() : "";
+    let budget = ADAPTIVE_EFFORT_TO_BUDGET[key] ?? ADAPTIVE_EFFORT_TO_BUDGET.high;
+    const max = generationConfig.maxOutputTokens;
+    if (typeof max === "number" && max > 0) {
+      const cap = Math.floor(max / 2);
+      if (cap < 512) return;
+      budget = Math.min(budget, cap);
+    }
+    generationConfig.thinkingConfig = {
+      thinkingBudget: budget,
+      includeThoughts: thinking.display !== "omitted",
     };
   }
 }
@@ -414,7 +446,7 @@ export function anthropicToGeminiContents(body: any): {
   if (body.top_k !== undefined) generationConfig.topK = body.top_k;
   if (body.stop_sequences?.length)
     generationConfig.stopSequences = body.stop_sequences;
-  applyThinkingConfig(generationConfig, body.thinking);
+  applyThinkingConfig(generationConfig, body.thinking, body.output_config?.effort);
 
   const tools =
     Array.isArray(body.tools) && body.tools.length
@@ -423,6 +455,32 @@ export function anthropicToGeminiContents(body: any): {
   const toolConfig = convertToolConfig(body.tool_choice);
 
   return { contents, systemInstruction, tools, toolConfig, generationConfig };
+}
+
+// ── Abnormal end with no output (CLIProxyAPI cf07c78a) ──
+
+// Gemini ends some failed generations with one of these reasons and no part a
+// client can use: relayed as a 200, the client saw an empty answer.
+const ZERO_OUTPUT_ABNORMAL_REASONS = new Set([
+  "MALFORMED_FUNCTION_CALL",
+  "UNEXPECTED_TOOL_CALL",
+  "MALFORMED_RESPONSE",
+]);
+
+export function isZeroOutputAbnormalFinish(reason: unknown): boolean {
+  return (
+    typeof reason === "string" &&
+    ZERO_OUTPUT_ABNORMAL_REASONS.has(reason.trim().toUpperCase())
+  );
+}
+
+/** True when an Anthropic message built from Gemini carries no text and no tool call. */
+export function hasNoVisibleOutput(message: any): boolean {
+  return !(message?.content || []).some(
+    (b: any) =>
+      b?.type === "tool_use" ||
+      (b?.type === "text" && typeof b.text === "string" && b.text.trim() !== ""),
+  );
 }
 
 // ── Gemini finishReason → Anthropic stop_reason ──

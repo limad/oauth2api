@@ -14,7 +14,10 @@ import {
   finishGeminiStream,
   makeGeminiStreamState,
   resolveGeminiModel,
+  isZeroOutputAbnormalFinish,
+  hasNoVisibleOutput,
 } from "./gemini-translator";
+import { REQUEST_ERROR_HEADER } from "../utils/http";
 
 // RPC-style URL shape (`:method`, not `/method`) verified against
 // google-gemini/gemini-cli (packages/core/src/code_assist/server.ts).
@@ -381,20 +384,60 @@ export async function callGeminiMessages(
   if (!stream) {
     const data = await upstream.json();
     const anthropicJson = geminiResponseToAnthropic(data, model);
+    const reason = (data?.response ?? data)?.candidates?.[0]?.finishReason;
+    if (isZeroOutputAbnormalFinish(reason) && hasNoVisibleOutput(anthropicJson)) {
+      return zeroOutputResponse(reason, model);
+    }
     return new Response(JSON.stringify(anthropicJson), {
       status: 200,
       headers: { "Content-Type": "application/json" },
     });
   }
 
-  const encoder = new TextEncoder();
+  // The translator emits nothing (not even message_start) until a part with
+  // output arrives, so leading chunks without output are read before answering:
+  // a stream that ends that way with an abnormal reason becomes a 502 instead
+  // of a 200 with an empty message. Output starts the stream as before.
   const state = makeGeminiStreamState(model);
+  const events = readSseEvents(upstream)[Symbol.asyncIterator]();
+  const pending: string[] = [];
+  let upstreamDone = false;
+  // A read error here is replayed inside the 200 stream, as before: it must not
+  // turn into a proxyWithRetry network failure (cooldown + retry).
+  let readError: unknown = null;
+  try {
+    while (!state.messageStartSent) {
+      const next = await events.next();
+      if (next.done) {
+        upstreamDone = true;
+        break;
+      }
+      if (!next.value.data) continue;
+      pending.push(...geminiChunkToAnthropicSSE(next.value.data, state));
+    }
+  } catch (err) {
+    readError = err;
+  }
+  if (
+    !readError &&
+    upstreamDone &&
+    !state.messageStartSent &&
+    isZeroOutputAbnormalFinish(state.finishReason)
+  ) {
+    return zeroOutputResponse(state.finishReason!, model);
+  }
+
+  const encoder = new TextEncoder();
   const sseStream = new ReadableStream<Uint8Array>({
     async start(controller) {
       try {
-        for await (const { data } of readSseEvents(upstream)) {
-          if (!data) continue;
-          for (const line of geminiChunkToAnthropicSSE(data, state)) {
+        for (const line of pending) controller.enqueue(encoder.encode(line));
+        if (readError) throw readError;
+        while (!upstreamDone) {
+          const next = await events.next();
+          if (next.done) break;
+          if (!next.value.data) continue;
+          for (const line of geminiChunkToAnthropicSSE(next.value.data, state)) {
             controller.enqueue(encoder.encode(line));
           }
         }
@@ -407,10 +450,40 @@ export async function callGeminiMessages(
       }
       controller.close();
     },
+    async cancel() {
+      await events.return?.(undefined);
+    },
   });
 
   return new Response(sseStream, {
     status: 200,
     headers: { "Content-Type": "text/event-stream" },
   });
+}
+
+/**
+ * Gemini ended without any output for a reason such as MALFORMED_FUNCTION_CALL
+ * (CLIProxyAPI cf07c78a): 502 in Anthropic error shape. The account is fine and
+ * the same request would likely fail again, so REQUEST_ERROR_HEADER makes
+ * proxyWithRetry surface it without cooldown or retry (no extra upstream call).
+ */
+function zeroOutputResponse(reason: string, model: string): Response {
+  const upper = reason.trim().toUpperCase();
+  console.log(`[gemini-call] ${model} finished with ${upper} and no output: 502`);
+  return new Response(
+    JSON.stringify({
+      type: "error",
+      error: {
+        type: "api_error",
+        message: `Gemini response finished with ${upper} and no output`,
+      },
+    }),
+    {
+      status: 502,
+      headers: {
+        "Content-Type": "application/json",
+        [REQUEST_ERROR_HEADER]: "empty_output",
+      },
+    },
+  );
 }

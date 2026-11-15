@@ -4,6 +4,7 @@ import {
   AccountManager,
   AccountResult,
   AvailableAccount,
+  MAX_RESET_HINT_MS,
 } from "../accounts/manager";
 import { ProviderId } from "../auth/types";
 import { Config, isDebugLevel } from "../config";
@@ -37,6 +38,39 @@ export function isAmbiguousGoogle429(status: number, body: string): boolean {
     return false;
   }
 }
+
+/**
+ * Google suspends an account it judges in breach of its terms with a 403
+ * PERMISSION_DENIED carrying `google.rpc.ErrorInfo` reason TOS_VIOLATION
+ * (Antigravity, CLIProxyAPI 5a351d95). Retrying it every hour only adds calls
+ * from a flagged account: it is paused for MAX_RESET_HINT_MS instead, until a
+ * re-login replaces the token (the reload clears the cooldown).
+ */
+export function isGoogleTosViolation(status: number, body: string): boolean {
+  if (status !== 403 || !body) return false;
+  try {
+    const details = JSON.parse(body)?.error?.details;
+    return (
+      Array.isArray(details) &&
+      details.some(
+        (d: any) =>
+          d?.["@type"] === "type.googleapis.com/google.rpc.ErrorInfo" &&
+          typeof d.reason === "string" &&
+          d.reason.toUpperCase() === "TOS_VIOLATION",
+      )
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Header set on a Response the proxy builds itself (never by an upstream) to say
+ * "this request failed, the account is fine": surfaced to the client with no
+ * cooldown and no retry, like `requestErrorStatuses`. Its value is the stats
+ * failure kind (e.g. "empty_output").
+ */
+export const REQUEST_ERROR_HEADER = "x-oauth2api-request-error";
 
 /**
  * Providers whose 429 limits cover the whole account. Claude and Gemini/Antigravity
@@ -345,10 +379,14 @@ export async function proxyWithRetry(
       }
 
       lastStatus = upstream.status;
-      const requestError = !!options.requestErrorStatuses?.includes(lastStatus);
+      const proxyRequestError = upstream.headers.get(REQUEST_ERROR_HEADER);
+      const requestError =
+        !!options.requestErrorStatuses?.includes(lastStatus) || !!proxyRequestError;
       tagStatsFailure(
         resp,
-        requestError
+        proxyRequestError
+          ? proxyRequestError
+          : requestError
           ? "client_error"
           : lastStatus >= 400 && lastStatus < 500
             ? lastStatus === 401 || lastStatus === 403 || lastStatus === 429
@@ -413,11 +451,19 @@ export async function proxyWithRetry(
       ) {
         // Account-level failures: cooldown, may retry on another account. A 429
         // that says when the account resets pauses it until then (account-wide limits only).
+        const tosViolation = isGoogleTosViolation(lastStatus, lastErrBody);
+        if (tosViolation) {
+          console.error(
+            `${tag} account ${account.token.email} suspended by Google (403 TOS_VIOLATION): paused until re-login`,
+          );
+        }
         manager.recordFailure(
           account.token.email,
           classifyFailure(lastStatus),
-          undefined,
-          accountResetAt(manager.provider, lastStatus, upstream.headers, lastErrBody),
+          tosViolation ? "TOS_VIOLATION" : undefined,
+          tosViolation
+            ? Date.now() + MAX_RESET_HINT_MS
+            : accountResetAt(manager.provider, lastStatus, upstream.headers, lastErrBody),
         );
       }
       // Other 4xx (400, 404, 422, …) are client request errors — the account is
