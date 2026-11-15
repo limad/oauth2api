@@ -37,8 +37,11 @@ test("adaptive thinking: effort mapping", () => {
 
 test("adaptive thinking: none disables where allowed, clamps to low on always-on models", () => {
   const sonnet = chat("claude-sonnet-5-5", { reasoning_effort: "none" });
-  assert.deepEqual(sonnet.thinking, { type: "disabled" });
+  assert.deepEqual(sonnet.thinking, { type: "between_tools" }, "sonnet-5-5 refuses disabled");
   assert.equal(sonnet.output_config, undefined);
+  for (const m of ["claude-haiku-5-5", "claude-sonnet-5", "claude-opus-5"]) {
+    assert.deepEqual(chat(m, { reasoning_effort: "none" }).thinking, { type: "disabled" }, m);
+  }
 
   for (const m of ["claude-opus-5-5", "claude-fable-5-2"]) {
     const out = chat(m, { reasoning_effort: "none" });
@@ -57,6 +60,16 @@ test("adaptive thinking: response_format keeps the effort in output_config", () 
   });
   assert.equal(out.output_config.effort, "low");
   assert.equal(out.output_config.format.type, "json_schema");
+  assert.equal(out.output_config.format.name, undefined, "Anthropic refuses format.name");
+});
+
+test("Responses text.format json_schema: no name in output_config.format", () => {
+  const out = responsesToAnthropic({
+    model: "claude-haiku-5-5",
+    input: "hi",
+    text: { format: { type: "json_schema", name: "Out", schema: { type: "object" } } },
+  });
+  assert.deepEqual(out.output_config.format, { type: "json_schema", schema: { type: "object" } });
 });
 
 test("adaptive thinking: Responses reasoning.summary becomes display", () => {

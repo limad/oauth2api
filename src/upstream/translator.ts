@@ -112,6 +112,12 @@ const EFFORT_TO_BUDGET: Record<string, number> = {
 const ADAPTIVE_THINKING_RE = /^claude-(opus|sonnet|haiku|fable)-5(-|$)/;
 /** Always-thinking models: they refuse `thinking.type: "disabled"`. */
 const THINKING_ALWAYS_ON_RE = /^claude-(opus-5-5|fable-5)(-|$)/;
+/**
+ * Models whose "off" switch is `between_tools` (no thinking before answering,
+ * short updates between tool calls): `disabled` is refused with a 400 telling
+ * to send it instead (claude-sonnet-5-5, checked 2026-11-15).
+ */
+const THINKING_OFF_BETWEEN_TOOLS_RE = /^claude-sonnet-5-5(-|$)/;
 
 /** Anthropic `output_config.effort` levels (no "minimal"). */
 const ADAPTIVE_EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
@@ -127,7 +133,11 @@ function applyAdaptiveThinking(
 ): void {
   const alwaysOn = THINKING_ALWAYS_ON_RE.test(anthropicBody.model);
   if (effort === "none" && !alwaysOn) {
-    anthropicBody.thinking = { type: "disabled" };
+    anthropicBody.thinking = {
+      type: THINKING_OFF_BETWEEN_TOOLS_RE.test(anthropicBody.model)
+        ? "between_tools"
+        : "disabled",
+    };
     return;
   }
   const level =
@@ -300,7 +310,8 @@ export function openaiToAnthropic(body: any): any {
   const messages: any[] = [];
   const systemParts: any[] = [];
 
-  // response_format → output_config or system hint
+  // response_format → output_config or system hint. Anthropic's format takes
+  // type + schema only: a `name` is refused (400 "Extra inputs are not permitted").
   if (body.response_format) {
     const fmt = body.response_format;
     if (fmt.type === "json_schema" && fmt.json_schema) {
@@ -309,7 +320,6 @@ export function openaiToAnthropic(body: any): any {
         format: {
           type: "json_schema",
           schema: fmt.json_schema.schema,
-          name: fmt.json_schema.name,
         },
       };
     } else if (fmt.type === "json_object") {
@@ -720,7 +730,6 @@ export function responsesToAnthropic(body: any): any {
         format: {
           type: "json_schema",
           schema: fmt.schema,
-          name: fmt.name,
         },
       };
     } else if (fmt.type === "json_object") {
