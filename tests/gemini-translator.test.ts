@@ -16,6 +16,9 @@ test("resolveGeminiModel: maps friendly names to real Code Assist backend ids", 
   assert.equal(resolveGeminiModel("gemini-3.1-pro"), "gemini-pro-agent");
   assert.equal(resolveGeminiModel("gemini-2.5-pro"), "gemini-pro-agent");
   assert.equal(resolveGeminiModel("gemini-2.5-flash"), "gemini-3-flash");
+  assert.equal(resolveGeminiModel("gemini-4-hydrogen"), "gemini-4-hydrogen-medium");
+  assert.equal(resolveGeminiModel("gemini-3.8-flash"), "gemini-3.8-flash-medium");
+  assert.equal(resolveGeminiModel("gemini-4-hydrogen-xhigh"), "gemini-4-hydrogen-xhigh");
 });
 
 test("resolveGeminiModel: real backend ids pass through unchanged", () => {

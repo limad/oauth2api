@@ -39,6 +39,10 @@ const GEMINI_MODEL_ALIASES: Record<string, string> = {
   "gemini-3-flash-preview": "gemini-3-flash",
   "gemini-4-argon": "gemini-4-argon-medium",
   "gemini-4-argon-preview": "gemini-4-argon-medium",
+  // Public names 404 on the backend, which only lists -low/-medium/-high(/-xhigh)
+  // (fetchAvailableModels, 2026-11-15); medium is Antigravity's default tier.
+  "gemini-4-hydrogen": "gemini-4-hydrogen-medium",
+  "gemini-3.8-flash": "gemini-3.8-flash-medium",
   "gemini-3-pro-image-preview": "gemini-3-pro-image",
   "gemini-3-flash-image": "gemini-3.1-flash-image",
   "gemini-3.1-flash-image-preview": "gemini-3.1-flash-image",
