@@ -733,7 +733,7 @@ test("openaiToAnthropic translates system messages", () => {
 
 test("openaiToAnthropic translates reasoning_effort to thinking", () => {
   const result = openaiToAnthropic({
-    model: "sonnet",
+    model: "claude-sonnet-4-6" /* budget shape; 5.x is adaptive */,
     reasoning_effort: "high",
     messages: [{ role: "user", content: "hi" }],
   });
@@ -1097,7 +1097,7 @@ test("responsesToAnthropic translates instructions to system", () => {
 
 test("responsesToAnthropic translates reasoning with summary", () => {
   const result = responsesToAnthropic({
-    model: "sonnet",
+    model: "claude-sonnet-4-6" /* budget shape; 5.x is adaptive */,
     input: [{ role: "user", content: "hi" }],
     reasoning: { effort: "high", summary: "concise" },
   });

@@ -13,7 +13,7 @@ const PROVIDER_IDS: readonly string[] = ["anthropic", "codex", "copilot", "curso
  * Controls how auth2api mimics Claude Code CLI's request signature.
  */
 export interface CloakingConfig {
-  /** CLI version to impersonate in User-Agent and fingerprint (default: 2.1.280) */
+  /** CLI version to impersonate in User-Agent and fingerprint (default: 2.1.321) */
   "cli-version"?: string;
   /** Entrypoint value for billing header (default: cli) */
   entrypoint?: string;
@@ -118,7 +118,7 @@ const DEFAULT_RAW: RawConfig = {
   "account-strategy-by-provider": {},
   "body-limit": "200mb",
   cloaking: {
-    "cli-version": "2.1.280",
+    "cli-version": "2.1.321",
     entrypoint: "cli",
   },
   timeouts: {

@@ -68,6 +68,7 @@ const MODEL_ALIASES: Record<string, string> = {
   "claude-haiku-5-5": "claude-haiku-5-5",
   "claude-sonnet-5-5": "claude-sonnet-5-5",
   "claude-opus-5-5": "claude-opus-5-5",
+  "claude-fable-5-2": "claude-fable-5-2",
   "claude-fable-5-1": "claude-fable-5-1",
   "claude-opus-5": "claude-opus-5",
   "claude-sonnet-5": "claude-sonnet-5",
@@ -102,11 +103,59 @@ const EFFORT_TO_BUDGET: Record<string, number> = {
   xhigh: 32768,
 };
 
+/**
+ * Claude 5.x ids only take adaptive thinking (`thinking.type: "adaptive"` plus
+ * `output_config.effort`): the Claude API answers 400 "thinking.type.enabled is
+ * not supported" on claude-haiku-5-5. Antigravity ids (`ag/claude-*`) keep the
+ * budget shape, which the Gemini translator maps to a thinkingBudget.
+ */
+const ADAPTIVE_THINKING_RE = /^claude-(opus|sonnet|haiku|fable)-5(-|$)/;
+/** Always-thinking models: they refuse `thinking.type: "disabled"`. */
+const THINKING_ALWAYS_ON_RE = /^claude-(opus-5-5|fable-5)(-|$)/;
+
+/** Anthropic `output_config.effort` levels (no "minimal"). */
+const ADAPTIVE_EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
+
+export function usesAdaptiveThinking(model: string): boolean {
+  return ADAPTIVE_THINKING_RE.test(model);
+}
+
+function applyAdaptiveThinking(
+  anthropicBody: any,
+  effort: string,
+  summary?: string,
+): void {
+  const alwaysOn = THINKING_ALWAYS_ON_RE.test(anthropicBody.model);
+  if (effort === "none" && !alwaysOn) {
+    anthropicBody.thinking = { type: "disabled" };
+    return;
+  }
+  const level =
+    effort === "none" || effort === "minimal"
+      ? "low"
+      : ADAPTIVE_EFFORTS.has(effort)
+        ? effort
+        : "medium";
+  const display = summary && summary !== "auto" ? "summarized" : undefined;
+  // Always-on models take the effort alone; they still get the switch when it
+  // carries a display, which defaults to "omitted" otherwise.
+  if (!alwaysOn) {
+    anthropicBody.thinking = { type: "adaptive", ...(display ? { display } : {}) };
+  } else if (display && effort !== "none") {
+    anthropicBody.thinking = { type: "adaptive", display };
+  }
+  anthropicBody.output_config = { ...anthropicBody.output_config, effort: level };
+}
+
 function applyThinking(
   anthropicBody: any,
   effort: string,
   summary?: string,
 ): void {
+  if (usesAdaptiveThinking(anthropicBody.model)) {
+    applyAdaptiveThinking(anthropicBody, effort, summary);
+    return;
+  }
   if (effort === "none") {
     anthropicBody.thinking = { type: "disabled" };
     return;
@@ -256,6 +305,7 @@ export function openaiToAnthropic(body: any): any {
     const fmt = body.response_format;
     if (fmt.type === "json_schema" && fmt.json_schema) {
       anthropicBody.output_config = {
+        ...anthropicBody.output_config,
         format: {
           type: "json_schema",
           schema: fmt.json_schema.schema,
@@ -666,6 +716,7 @@ export function responsesToAnthropic(body: any): any {
     const fmt = body.text.format;
     if (fmt.type === "json_schema" && fmt.schema) {
       anthropicBody.output_config = {
+        ...anthropicBody.output_config,
         format: {
           type: "json_schema",
           schema: fmt.schema,

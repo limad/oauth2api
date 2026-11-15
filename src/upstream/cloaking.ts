@@ -30,7 +30,7 @@ function extractFirstUserMessageText(messages: any[]): string {
   return "";
 }
 
-function computeFingerprint(messageText: string, version: string): string {
+export function computeFingerprint(messageText: string, version: string): string {
   const indices = [4, 7, 20];
   const chars = indices.map((i) => messageText[i] || "0").join("");
   const input = `${FINGERPRINT_SALT}${chars}${version}`;
@@ -148,6 +148,44 @@ function countCacheBreakpoints(body: any): number {
   );
 }
 
+/** Blocks Anthropic cannot cache (a breakpoint on them is refused). */
+const UNCACHEABLE_BLOCKS = new Set(["thinking", "redacted_thinking"]);
+
+/**
+ * Anthropic automatic caching: a top-level `cache_control` applies to the last
+ * cacheable block and takes one of the 4 breakpoints. Moved onto that block here
+ * so the breakpoint count, the auto cache and the injected prefix TTL all see it
+ * (otherwise the auto cache adds up to 3 more and the request exceeds 4 -> 400).
+ */
+function materializeTopLevelCacheControl(body: any): void {
+  const marker = body.cache_control;
+  if (!marker) return;
+  delete body.cache_control;
+  const messages: any[] = Array.isArray(body.messages) ? body.messages : [];
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (typeof msg?.content === "string") {
+      if (!msg.content) continue;
+      msg.content = [{ type: "text", text: msg.content, cache_control: marker }];
+      return;
+    }
+    if (!Array.isArray(msg?.content)) continue;
+    for (let j = msg.content.length - 1; j >= 0; j--) {
+      const block = msg.content[j];
+      if (!block || UNCACHEABLE_BLOCKS.has(block.type)) continue;
+      if (!block.cache_control) block.cache_control = marker;
+      return;
+    }
+  }
+  // No cacheable message block: keep the client's intent on the last system block.
+  if (typeof body.system === "string" && body.system) {
+    body.system = [{ type: "text", text: body.system, cache_control: marker }];
+  } else if (Array.isArray(body.system) && body.system.length > 0) {
+    const last = body.system[body.system.length - 1];
+    if (last && !last.cache_control) last.cache_control = marker;
+  }
+}
+
 export function applyCloaking(options: CloakingOptions): any {
   const { request, account, config } = options;
   const body = structuredClone(options.body ?? request.body);
@@ -159,6 +197,8 @@ export function applyCloaking(options: CloakingOptions): any {
   // Ensures billing header and CLI prefix are present in the system blocks.
   // Claude Code CLI clients may already include these; if so, keep the originals.
   // For OpenAI-compatible clients we generate them from scratch.
+
+  materializeTopLevelCacheControl(body);
 
   // Breakpoints set by the client itself, before anything is injected.
   const clientBreakpoints = countCacheBreakpoints(body);

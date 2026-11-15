@@ -11,11 +11,12 @@ const RESPONSES_PATH = "/codex/responses";
 const RESPONSES_COMPACT_PATH = "/codex/responses/compact";
 
 const DEFAULT_ORIGINATOR = "codex_cli_rs";
-// Bumped to 0.163.0 — backend version-gates `gpt-6-luna` and rejects
+// Bumped to 0.167.1 (gpt-6.1-sol is refused below it, 9router aaf9b65f; 0.163.0
+// was needed for `gpt-6-luna`) — backend version-gates models and rejects
 // older versions with "model is not supported when using Codex". Matches latest
 // @openai/codex on npm. Override via
 // `cloaking.codex.cli-version` if upstream's minimum changes again.
-const DEFAULT_CLI_VERSION = "0.163.0";
+const DEFAULT_CLI_VERSION = "0.167.1";
 
 function buildUserAgent(config: Config): string {
   const codex = config.cloaking.codex || {};
