@@ -119,6 +119,11 @@ const THINKING_ALWAYS_ON_RE = /^claude-(opus-5-5|fable-5)(-|$)/;
  */
 const THINKING_OFF_BETWEEN_TOOLS_RE = /^claude-sonnet-5-5(-|$)/;
 
+/** Claude ids, direct or behind a provider prefix (`ag/claude-*`). */
+const CLAUDE_MODEL_RE = /(^|\/)claude-/;
+/** Smallest `budget_tokens` Claude accepts. */
+const CLAUDE_MIN_THINKING_BUDGET = 1024;
+
 /** Anthropic `output_config.effort` levels (no "minimal"). */
 const ADAPTIVE_EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
 
@@ -170,7 +175,12 @@ function applyThinking(
     anthropicBody.thinking = { type: "disabled" };
     return;
   }
-  const budget = EFFORT_TO_BUDGET[effort];
+  let budget = EFFORT_TO_BUDGET[effort];
+  // Claude refuses budget_tokens below 1024 (400), direct or via Antigravity:
+  // "minimal" gets the smallest budget Claude accepts (CLIProxyAPI 75d03aea).
+  if (budget && CLAUDE_MODEL_RE.test(anthropicBody.model || "")) {
+    budget = Math.max(budget, CLAUDE_MIN_THINKING_BUDGET);
+  }
   if (budget) {
     anthropicBody.thinking = { type: "enabled", budget_tokens: budget };
     if (anthropicBody.max_tokens <= budget) {
@@ -587,6 +597,22 @@ const chatSSEHandlers: Record<string, ChatSSEHandler> = {
       ];
     }
     return [];
+  },
+
+  // Claude streams a parameterless call as an empty input_json_delta: OpenAI
+  // clients would get `arguments: ""`, which is not JSON. Send "{}" instead
+  // (CLIProxyAPI dd866f6c / 28a00389 for the Gemini side).
+  content_block_stop: (data, state) => {
+    const tc = state.toolCalls.get(data.index);
+    if (!tc || tc.args.trim()) return [];
+    tc.args = "{}";
+    return [
+      makeChunk(
+        state,
+        { tool_calls: [{ index: tc.openaiIndex, function: { arguments: "{}" } }] },
+        null,
+      ),
+    ];
   },
 
   message_delta: (data, state) => [
@@ -1192,6 +1218,19 @@ const responsesSSEHandlers: Record<string, ResponsesSSEHandler> = {
       state.currentThinkingText = "";
     } else if (state.inToolBlock) {
       const fcId = `fc_${state.currentToolId}`;
+      // Parameterless call (empty input_json_delta): arguments must be JSON.
+      if (!state.currentToolArgs.trim()) {
+        state.currentToolArgs = "{}";
+        out.push(
+          formatSSE({
+            type: "response.function_call_arguments.delta",
+            sequence_number: nextSeq(),
+            item_id: fcId,
+            output_index: idx,
+            delta: "{}",
+          }),
+        );
+      }
       out.push(
         formatSSE({
           type: "response.function_call_arguments.done",
