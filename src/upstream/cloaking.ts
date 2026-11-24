@@ -75,8 +75,42 @@ function buildUserId(
 function isBillingHeaderBlock(block: any): boolean {
   return (
     typeof block.text === "string" &&
-    block.text.includes("x-anthropic-billing-header")
+    (block.text.includes("x-anthropic-billing-header") ||
+      isStandaloneBillingBlock(block))
   );
+}
+
+const LEADING_BILLING_LINE_RE = /^(x-anthropic-billing-header:[^\n]*?)\r?\n/i;
+
+/** A block holding the billing line alone (what Claude Code sends as system[0]). */
+function isStandaloneBillingBlock(block: any): boolean {
+  return (
+    typeof block?.text === "string" &&
+    /^x-anthropic-billing-header:[^\n]*$/i.test(block.text.trim())
+  );
+}
+
+/**
+ * Splits a leading billing line off the text blocks that carry more after it:
+ * the first one becomes a standalone block (kept as the billing header), the
+ * others are dropped. The rest of each text keeps its cache_control.
+ */
+function splitLeadingBillingLine(blocks: any[]): void {
+  let billing: any = null;
+  for (let i = 0; i < blocks.length; i++) {
+    const block = blocks[i];
+    if (block?.type !== "text" || typeof block.text !== "string") continue;
+    const m = LEADING_BILLING_LINE_RE.exec(block.text);
+    if (!m) continue;
+    const rest = block.text.slice(m[0].length);
+    if (!rest.trim()) continue;
+    blocks[i] = { ...block, text: rest };
+    if (!billing && !blocks.some(isStandaloneBillingBlock)) {
+      billing = { type: "text", text: m[1] };
+      blocks.unshift(billing);
+      i++;
+    }
+  }
 }
 
 /** Checks if system block is the CLI prefix */
@@ -207,6 +241,12 @@ export function applyCloaking(options: CloakingOptions): any {
   const remaining: any[] = Array.isArray(existingSystem)
     ? [...existingSystem]
     : [{ type: "text", text: existingSystem }];
+
+  // A client system text that starts with Claude Code's billing line (an OpenAI
+  // client relaying Claude Code's prompt joins it with the rest) would put a
+  // per-turn line into cached text and split the prompt cache: it is moved to
+  // its own block, the only place Anthropic ignores it (9router 971ae638).
+  splitLeadingBillingLine(remaining);
 
   // Extract existing billing header and prefix if present, removing them from remaining
   const billingIdx = remaining.findIndex(isBillingHeaderBlock);
