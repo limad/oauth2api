@@ -416,6 +416,7 @@ export function createServer(
     express.raw({ type: "multipart/form-data", limit: config["body-limit"] }),
     createMistralExtraHandler("transcriptions", config, registry),
   );
+  app.post("/v1/audio/speech", createMistralExtraHandler("speech", config, registry));
 
   return app;
 }
