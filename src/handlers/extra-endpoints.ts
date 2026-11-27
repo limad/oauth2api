@@ -10,6 +10,7 @@ import {
   clientAffinity,
   MistralExtraKind,
   MISTRAL_EXTRA_PATHS,
+  mistralSpeechBody,
   multipartField,
   replaceMultipartField,
   stripMistralPrefix,
@@ -26,6 +27,7 @@ const EXAMPLE_MODEL: Record<MistralExtraKind, string> = {
   embeddings: "mistral-embed",
   ocr: "mistral-ocr-latest",
   transcriptions: "voxtral-mini-latest",
+  speech: "voxtral-mini-tts-latest",
 };
 
 const ZERO_USAGE: UsageData = {
@@ -43,11 +45,13 @@ function badRequest(resp: ExpressResponse, message: string): void {
 }
 
 /**
- * Routes outside chat (FIM, embeddings, OCR, audio transcription), relayed as
- * is: the body goes upstream untouched (only a `mistral/` or `copilot-` model
- * prefix is removed), the answer comes back untouched. Mistral (Vibe key)
- * serves all four; Copilot also serves embeddings (`text-embedding-*`). Any
- * other model is refused here without any upstream call.
+ * Routes outside chat (FIM, embeddings, OCR, audio transcription and speech),
+ * relayed as is: the body goes upstream untouched (only a `mistral/` or
+ * `copilot-` model prefix is removed), the answer comes back untouched. Mistral
+ * (Vibe key) serves all five; Copilot also serves embeddings
+ * (`text-embedding-*`). Any other model is refused here without any upstream
+ * call. Speech in the OpenAI shape (`voice`) is the one exception: Mistral's
+ * JSON answer (`audio_data`, base64) is sent back as raw audio.
  */
 export function createMistralExtraHandler(
   kind: MistralExtraKind,
@@ -62,6 +66,7 @@ export function createMistralExtraHandler(
       let model: string;
       let stream = false;
       let contentType: string | undefined;
+      let speech: { openai: boolean; mime: string } | undefined;
 
       if (kind === "transcriptions") {
         contentType = req.header("content-type") || "";
@@ -88,6 +93,11 @@ export function createMistralExtraHandler(
             ? stripCopilotPrefix(model)
             : stripMistralPrefix(model);
         body = bare !== model ? { ...req.body, model: bare } : req.body;
+        if (kind === "speech") {
+          const sp = mistralSpeechBody(body);
+          body = sp.body;
+          speech = { openai: sp.openai, mime: sp.mime };
+        }
       }
 
       if (!model) {
@@ -137,10 +147,11 @@ export function createMistralExtraHandler(
             }
             return;
           }
-          const text = await upstream.text();
+          const raw = Buffer.from(await upstream.arrayBuffer());
           let usage = ZERO_USAGE;
+          let json: any;
           try {
-            const json = JSON.parse(text);
+            json = JSON.parse(raw.toString("utf8"));
             usage = extractUsage(json);
             // Transcription: audio tokens are in total_tokens only
             // (prompt_tokens counts the text prompt), seen live on 2026-11-07.
@@ -156,10 +167,14 @@ export function createMistralExtraHandler(
           }
           provider.manager.recordSuccess(account.token.email, usage);
           tagStatsUsage(resp, usage);
+          if (speech?.openai && typeof json?.audio_data === "string") {
+            resp.status(upstream.status).type(speech.mime).send(Buffer.from(json.audio_data, "base64"));
+            return;
+          }
           resp
             .status(upstream.status)
             .type(upstream.headers.get("content-type") || "application/json")
-            .send(text);
+            .send(raw);
         },
         errorAdapter: openaiErrorBody,
       });

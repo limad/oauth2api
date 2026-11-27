@@ -274,3 +274,48 @@ test("Copilot embeddings: a string input is sent as a one-item list, nothing els
   assert.deepEqual(normalizeCopilotEmbeddingsBody(list), list);
   assert.deepEqual(normalizeCopilotEmbeddingsBody({ model: "text-embedding-3-small", input: [1, 2] }), { model: "text-embedding-3-small", input: [1, 2] });
 });
+
+test("speech, OpenAI shape: voice -> voice_id, extra fields dropped, base64 answer sent as raw audio", async () => {
+  const audio = Buffer.from([0xff, 0xf3, 0x44, 0xc4, 0x00, 0x0d, 0x0a, 0x2d]);
+  await withServer(() => json({ audio_data: audio.toString("base64") }), async (base, seen) => {
+    const r = await fetch(`${base}/v1/audio/speech`, {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ model: "mistral/voxtral-mini-tts-latest", input: "Bonjour", voice: "fr_marie_neutral", speed: 1, instructions: "calme" }),
+    });
+    assert.equal(r.status, 200);
+    assert.equal(r.headers.get("content-type"), "audio/mpeg");
+    assert.ok(Buffer.from(await r.arrayBuffer()).equals(audio));
+    assert.equal(seen[0].url, "https://api.mistral.ai/v1/audio/speech");
+    assert.deepEqual(JSON.parse(seen[0].body.toString()), {
+      model: "voxtral-mini-tts-latest",
+      input: "Bonjour",
+      response_format: "mp3",
+      voice_id: "fr_marie_neutral",
+    });
+  });
+});
+
+test("speech, Mistral shape (voice_id): body and JSON answer relayed as is", async () => {
+  const upstream = { audio_data: "AAEC" };
+  await withServer(() => json(upstream), async (base, seen) => {
+    const body = { model: "voxtral-mini-tts-latest", input: "Salut", voice_id: "fr_marie_neutral", response_format: "wav" };
+    const r = await fetch(`${base}/v1/audio/speech`, { method: "POST", headers: AUTH, body: JSON.stringify(body) });
+    assert.equal(r.status, 200);
+    assert.deepEqual(await r.json(), upstream);
+    assert.deepEqual(JSON.parse(seen[0].body.toString()), body);
+  });
+});
+
+test("speech: non-Mistral model refused without any upstream call", async () => {
+  await withServer(() => json({}), async (base, seen) => {
+    const r = await fetch(`${base}/v1/audio/speech`, {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ model: "gpt-4o-mini-tts", input: "a", voice: "coral" }),
+    });
+    assert.equal(r.status, 400);
+    assert.match((await r.json()).error.message, /voxtral-mini-tts-latest/);
+    assert.equal(seen.length, 0);
+  });
+});

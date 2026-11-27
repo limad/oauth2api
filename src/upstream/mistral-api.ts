@@ -309,6 +309,7 @@ export const MISTRAL_EXTRA_PATHS = {
   embeddings: "/v1/embeddings",
   ocr: "/v1/ocr",
   transcriptions: "/v1/audio/transcriptions",
+  speech: "/v1/audio/speech",
 } as const;
 export type MistralExtraKind = keyof typeof MISTRAL_EXTRA_PATHS;
 
@@ -353,6 +354,33 @@ export async function callMistralExtra(
       : err?.message || String(err);
     throw new Error(`mistral upstream fetch failed: ${detail}`);
   }
+}
+
+/** Content type of each OpenAI `response_format` for /v1/audio/speech. */
+const SPEECH_MIME: Record<string, string> = {
+  mp3: "audio/mpeg",
+  wav: "audio/wav",
+  flac: "audio/flac",
+  opus: "audio/ogg",
+  aac: "audio/aac",
+  pcm: "audio/pcm",
+};
+
+/**
+ * /v1/audio/speech body. Mistral's own shape (`voice_id`) is relayed as is;
+ * the OpenAI shape (`voice`, answer expected as raw audio) is reduced to the
+ * fields Mistral knows, and `openai` tells the handler to decode the base64
+ * `audio_data` of the answer.
+ */
+export function mistralSpeechBody(body: any): { body: any; openai: boolean; mime: string } {
+  const format = typeof body.response_format === "string" && body.response_format ? body.response_format : "mp3";
+  const mime = SPEECH_MIME[format.toLowerCase()] || "application/octet-stream";
+  if (body.voice_id !== undefined || body.voice === undefined) {
+    return { body, openai: false, mime };
+  }
+  const out: any = { model: body.model, input: body.input, response_format: format };
+  if (typeof body.voice === "string" && body.voice.trim()) out.voice_id = body.voice.trim();
+  return { body: out, openai: true, mime };
 }
 
 /** Value of one text field of a multipart/form-data body (null when absent). */
